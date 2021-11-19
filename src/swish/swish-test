@@ -41,13 +41,18 @@
   (cli-specs
    [incl-tags --tag (list "<tag>") "run only the tests with this tag"]
    [excl-tags --not (list "<tag>") "exclude tests with this tag"]
-   [progress --progress (string "<mode>") "<mode>={test|suite|none}"]
    [test-run --test-run (string "<UUID>")
     "use the specified <UUID> to identify the test run instead of generating one"]
+   [rerun --rerun (string "<type>")
+     (ct:join #\space
+       "rerun tests whose result type matches <type>, where <type> is"
+       "one of {pass|fail|skip} or a parenthesized Scheme list of those types;"
+       "here <spec> specifies test results in .ms.mo or .ss.mo files")]
    [specs (list . "<spec>") "directory | suite [{test | -t test} ...]"]))
 
 (define test-and-report-cli
   (cli-specs
+   [progress --progress (string "<mode>") "<mode>={test|suite|none}"]
    [load-prof --load-profile (list "<file>" "<file>" ...)
     "load the specified profile(s)"]
    [save-prof --save-profile (string "<file>")
@@ -168,8 +173,11 @@
     [(all details)
      (wrap 0
        "By default, " who " runs all tests in the specified test suites."
-       "To run a limited set of tests, specify a suite or a suite and test"
-       "or use --tag or --not to filter tests based on tags.\n"
+       "To run a limited set of tests, use --tag or --not to select or exclude"
+       "tests based on the tags present in the mat or isolate-mat forms."
+       "To run particular tests, specify a suite followed by names of one"
+       "or more tests in the suite. Use -t to disambiguate where a test name"
+       "happens to match the name of an existing suite.\n"
        "\n"
        "Test suites are files with a \".ms\" or \".ss\" extension listed"
        "explicitly on the command line or found by recursively searching"
@@ -220,7 +228,12 @@
        "run tests t1, t2, and t3 from ./src/foo.ms and all tests from src/bar.ms\n")
      (example (who " --tag fast --not regression src web")
        "run only the tests under src and web whose mat tags include fast,"
-       "but not regression.")])
+       "but not regression.\n")
+     (example (who " --rerun fail --not long src web/alt.ms.mo")
+       "rerun failed tests under src or in web/alt.ms"
+       "whose tags do not include long.\n")
+     (example (who " --rerun '(skip fail)' .")
+       "rerun tests under . that failed or were skipped.")])
   (let ([invalid (fold-right remq sections help-sections)])
     (unless (null? invalid)
       (fail "unrecognized help section~p:~{ ~a~}" (length invalid) invalid)))
@@ -241,7 +254,7 @@
           (match entry
             [(,fn . ,@DIRENT_DIR) (search (combine path fn) hits)]
             [(,fn . ,@DIRENT_FILE)
-             (if (member (path-extension fn) extensions)
+             (if (ormap (lambda (ext) (ends-with-ci? fn ext)) extensions)
                  (cons (combine path fn) hits)
                  hits)]
             [,_ hits])) ;; not following symlinks
@@ -592,22 +605,10 @@
             (div (@ (class "vscroll"))
               (table (@ (id "content"))))))))))
 
-(define (console-summary mat-data* reporting?)
-  (let-values ([(pass fail skip completed attempted) (summarize-results mat-data*)])
-    (when reporting?
-      (printf "Tests run: ~s   Pass: ~s   Fail: ~s   Skip: ~s\n\n"
-        (+ pass fail) pass fail skip))
-    (let ([incomplete (- attempted completed)])
-      (unless (zero? incomplete)
-        (printf "*** Some test suite~p did not complete ***\n\n" incomplete)))))
-
 (define (if-exists fn) (and (regular-file? fn) fn))
 
 (define (get-test-files x)
-  (and (directory? x) (find-files x "ms" "ss")))
-
-(define (get-test-suite x)
-  (or (if-exists x) (if-exists (string-append x ".ms"))))
+  (and (directory? x) (find-files x ".ms" ".ss")))
 
 (define (path->file-uri path)
   (define (sanitize path)
@@ -621,15 +622,52 @@
 
 (define-tuple <pre-spec> suite test)
 
+(define (get-rerun types x)
+  (cond
+   [(not types) #f]
+   [(null? types) '()]
+   [(directory? x) (extract-reruns types (find-files x ".ms.mo" ".ss.mo"))]
+   [(if-exists x) (extract-reruns types (list x))]
+   [else #f]))
+
+(define (extract-reruns types ls)
+  (define (add-pre-spec ls mr)
+    (if (not (memq (mat-result-type mr) types))
+        ls
+        (cons (<pre-spec> make
+                [suite (mat-result-test-file mr)]
+                [test (symbol->string (mat-result-test mr))])
+          ls)))
+  (let lp ([ls ls] [pre-specs '()])
+    (if (null? ls)
+        (reverse pre-specs)
+        (let ([results (get-results (car ls))])
+          (unless (json:ref results '(meta-data completed) #f)
+            (printf "Warning: ~a found incomplete results in ~a.\n"
+              (option-named 'rerun) (car ls)))
+          (lp (cdr ls)
+            (fold-left add-pre-spec pre-specs
+              (mat-data-results results)))))))
+
+(define (parse-rerun-type s)
+  (let* ([x (read (open-input-string s))]
+         [ls (if (list? x) x (list x))])
+    (cond
+     [(ormap (lambda (x) (and (not (memq x '(pass fail skip))) x)) ls) =>
+        (lambda (type)
+          (fail "invalid ~a type ~s" (option-named 'rerun) type))]
+     [else ls])))
+
 (define (extract-pre-specs specs)
   (define out (make-hashtable values =))
+  (define (add-pre-spec! pre-spec)
+    (hashtable-set! out (hashtable-size out) pre-spec))
   (define (add-suite! suite)
     (when (may-have-mats? suite)
-      (hashtable-set! out (hashtable-size out)
-        (<pre-spec> make [suite suite] [test #f]))))
+      (add-pre-spec! (<pre-spec> make [suite suite] [test #f]))))
   (define (add-test! suite test)
-    (hashtable-set! out (hashtable-size out)
-      (<pre-spec> make [suite suite] [test test])))
+    (add-pre-spec! (<pre-spec> make [suite suite] [test test])))
+  (define types (cond [(opt 'rerun) => parse-rerun-type] [else #f]))
   (let lp ([specs specs])
     (cond
      [(null? specs)
@@ -637,11 +675,15 @@
        (vector-map cdr
          (vector-sort (lambda (a b) (< (car a) (car b)))
            (hashtable-cells out))))]
+     [(get-rerun types (car specs)) =>
+      (lambda (pre-specs)
+        (for-each add-pre-spec! pre-specs)
+        (lp (cdr specs)))]
      [(get-test-files (car specs)) =>
       (lambda (files)
         (for-each add-suite! files)
         (lp (cdr specs)))]
-     [(get-test-suite (car specs)) =>
+     [(if-exists (car specs)) =>
       (lambda (suite)
         (let lp2 ([added? #f] [ls (cdr specs)])
           (match ls
@@ -650,7 +692,7 @@
              (add-test! suite test)
              (lp2 #t rest)]
             [(,test . ,rest)
-             (guard (not (or (directory? test) (get-test-suite test))))
+             (guard (not (or (directory? test) (if-exists test))))
              (add-test! suite test)
              (lp2 #t rest)]
             [,rest
@@ -659,20 +701,26 @@
      [else
       (fail "expected directory or suite: ~s" (car specs))])))
 
+(define (get-results from)
+  (match (catch (load-results from))
+    [#(EXIT ,reason)
+     (fail "cannot load mat results from ~a: ~a" from
+       (exit-reason->english reason))]
+    [,results results]))
+
 (define (harvest from*)
   (let ([ht (make-hashtable string-hash string=?)])
-    (define (get-results from)
-      (match (catch (load-results from))
-        [#(EXIT ,reason)
-         (fail "cannot load mat results from ~a: ~a" from
-           (exit-reason->english reason))]
-        [,results results]))
     (define (add! from)
       (if (directory? from)
-          (for-each add! (find-files from "mo"))
-          (hashtable-set! ht from #t)))
+          (for-each add! (find-files from ".ms.mo" ".ss.mo"))
+          (hashtable-set! ht from (hashtable-size ht))))
     (for-each add! from*)
-    (vector->list (vector-map get-results (hashtable-keys ht)))))
+    (vector->list
+     (vector-map get-results
+       (vector-sort
+        (lambda (k1 k2)
+          (< (hashtable-ref ht k1 #f) (hashtable-ref ht k2 #f)))
+        (hashtable-keys ht))))))
 
 (define (option-named name)
   (format-spec
@@ -736,13 +784,16 @@
         [excl-tags (map string->symbol (or (opt 'excl-tags) '()))]
         [exclude (or (opt 'exclude) '())]
         [include (or (opt 'include) '())]
+        [rerun (opt 'rerun)]
         [save-prof (opt 'save-prof)]
         [load-prof (opt 'load-prof)]
-        [progress (string->symbol (or (opt 'progress) "test"))]
+        [progress (cond [(opt 'progress) => string->symbol] [else #f])]
         [report (opt 'report)]
         [coverage (opt 'coverage)]
         [pre-specs (extract-pre-specs (or (opt 'specs) '()))])
     (check-report-format report 'report)
+    (unless (memq progress '(#f test suite none))
+      (fail "invalid ~a ~s" (option-named 'progress) progress))
     (cond
      [(and load-prof (not (or save-prof coverage)))
       (fail "~a requires ~a or ~a"
@@ -760,6 +811,14 @@
         (option-named 'harvest)
         (option-named 'load-results)
         (option-named 'files))]
+     [(and (opt 'rerun) (opt 'harvest))
+      (fail "~a conflicts with ~a"
+        (option-named 'rerun)
+        (option-named 'harvest))]
+     [(and (opt 'rerun) (opt 'load-results))
+      (fail "~a conflicts with ~a"
+        (option-named 'rerun)
+        (option-named 'load-results))]
      [(and (opt 'harvest) (pair? pre-specs))
       (fail "~a conflicts with ~a"
         (option-named 'harvest)
@@ -791,7 +850,7 @@
                  [incl-tags incl-tags]
                  [excl-tags excl-tags]
                  [profile save-prof]
-                 [progress progress]
+                 [progress (or progress 'test)]
                  [lib-dirs (library-directories)]
                  [src-dirs (source-directories)])
                specs)))
@@ -842,7 +901,8 @@
                     (match (catch (profile:merge full-name))
                       [ok (void)]
                       [#(EXIT ,reason)
-                       (fail "cannot load profile data from ~a" user-supplied-name)]))))
+                       (fail "cannot load profile data from ~a: ~a" user-supplied-name
+                         (exit-reason->english reason))]))))
               (profile:stop))))]
        [save-prof (truncate-profile)])
       (let ([done (make-hashtable string-hash string=?)])
@@ -884,7 +944,17 @@
           (if (profile:dump-html (or save-prof load-prof) coverage include exclude)
               (printf "see ~a\n" (path->file-uri (get-real-path coverage)))
               (printf "no profile to dump\n")))
-        (console-summary summary (or report coverage (opt 'load-results) (opt 'harvest)))
+        (call-with-values
+          (lambda ()
+            (summarize-results summary
+              (cond
+               [(or (opt 'harvest) (opt 'load-results)) (or progress 'summary)]
+               [(or report coverage) 'summary]
+               [else 'none])))
+          (lambda (pass fail skip completed attempted)
+            (when (or (opt 'harvest) (opt 'load-results))
+              (unless (and (> pass 0) (= fail 0) (= skip 0) (= completed attempted))
+                (set! status 1)))))
         (when (opt 'info)
           (let ([ht (make-eq-hashtable)])
             (define (sym<? a b) (string<? (symbol->string a) (symbol->string b)))

@@ -53,6 +53,9 @@
    osi_get_executable_path
    osi_get_file_size
    osi_get_file_size*
+   osi_get_free_memory
+   osi_get_home_directory
+   osi_get_home_directory*
    osi_get_hostname
    osi_get_hostname*
    osi_get_hrtime
@@ -76,6 +79,7 @@
    osi_get_temp_directory
    osi_get_temp_directory*
    osi_get_time
+   osi_get_total_memory
    osi_get_uname
    osi_interrupt_database
    osi_is_quantum_over
@@ -175,6 +179,10 @@
   (fdefine osi_set_quantum (nanoseconds unsigned-64) void)
   (define-osi osi_start_signal (signum int))
   (define-osi osi_stop_signal (handler uptr))
+  (define osi_get_free_memory
+    (foreign-procedure "uv_get_free_memory" () unsigned-64))
+  (define osi_get_total_memory
+    (foreign-procedure "uv_get_total_memory" () unsigned-64))
 
   ;; Ports
   (define-osi osi_read_port (port uptr) (buffer ptr) (start-index size_t) (size unsigned-32) (offset integer-64) (callback ptr))
@@ -193,6 +201,7 @@
   (define-osi osi_get_executable_path)
   (define-osi osi_get_file_size (port uptr) (callback ptr))
   (define-osi osi_get_real_path (path string) (callback ptr))
+  (define-osi osi_get_home_directory)
   (define-osi osi_get_temp_directory)
   (define-osi osi_chmod (path string) (mode int) (callback ptr))
   (define-osi osi_make_directory (path string) (mode int) (callback ptr))

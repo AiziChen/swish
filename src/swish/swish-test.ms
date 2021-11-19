@@ -67,15 +67,15 @@
   (zero-exit (swish-test "--help")
     '("Usage:"
       seek
-      "progress <mode>"
+      "<spec> .* directory .* suite"
       seek
-      "<spec> .* directory .* suite"))
+      "progress <mode>"))
   (zero-exit (swish-test "-h all")
     '("Usage:"
       seek
-      "progress <mode>"
-      seek
       "<spec> .* directory .* suite"
+      seek
+      "progress <mode>"
       seek
       "By default,"
       seek
@@ -90,6 +90,8 @@
    '("swish-test Version (?:\\d+\\.){2}\\d+ \\([[:xdigit:]dirty-]+\\)")))
 
 (isolate-mat check-options ()
+  (nonzero-exit (swish-test "--progress pilgrim")
+    '() "invalid --progress pilgrim")
   (nonzero-exit (swish-test "--coverage foo")
     '() "--coverage requires --load-profile or --save-profile")
   ;; check for required options before complaining about missing file
@@ -103,7 +105,19 @@
   (nonzero-exit (swish-test "--harvest . --progress none .")
     '() "--harvest conflicts with <file> ...")
   (nonzero-exit (swish-test "--load-results foo.json .")
-    '() "--load-results conflicts with <file> ..."))
+    '() "--load-results conflicts with <file> ...")
+  (nonzero-exit (swish-test "--rerun skip --load-results foo.json .")
+    '() "--rerun conflicts with --load-results")
+  (nonzero-exit (swish-test "--rerun pass --harvest .")
+    '() "--rerun conflicts with --harvest")
+  (nonzero-exit (swish-test "--rerun sitcom .")
+    '() "invalid --rerun type sitcom")
+  ;; using \t as separator instead of space since swish-test helper
+  ;; splits on space
+  (nonzero-exit (swish-test "--rerun (pass\tfail\tsurprise) .")
+    '() "invalid --rerun type surprise")
+  (nonzero-exit (swish-test "--test-run amok")
+    '() "invalid --test-run UUID amok"))
 
 (isolate-mat load-this ()
   (write-test-file "test-load-this.ss"
@@ -226,8 +240,9 @@
   )
 
 (isolate-mat select-tests ()
+  (define subdir (uuid->string (osi_make_uuid)))
   (define test-file
-    (write-test-file "test-specified.ms"
+    (write-test-file (path-combine subdir "test-specified.ms")
       (lambda ()
         (for-each pretty-print
           '((import (swish mat))
@@ -288,6 +303,14 @@
      "SKIP *a5"
      "[-]+"
      "Tests run: 3   Pass: 2   Fail: 1   Skip: 2"))
+  ;; rerun skipped tests
+  (zero-exit
+   (swish-test "--rerun skip " (string-append test-file ".mo"))
+   '(seek
+     "pass *a4"
+     "pass *a5"
+     "[-]+"
+     "Tests run: 2   Pass: 2   Fail: 0   Skip: 0"))
   ;; exclusion tags are additive
   (nonzero-exit
    (swish-test "--progress test --not triv --not silly " test-file)
@@ -299,6 +322,22 @@
      "SKIP *a5"
      "[-]+"
      "Tests run: 2   Pass: 1   Fail: 1   Skip: 3"))
+  ;; rerun tests that passed or failed
+  (nonzero-exit
+   ;; using \t here to work around the split on spaces in swish-test helper
+   (swish-test "--rerun (pass\tfail) " (string-append test-file ".mo"))
+   '(seek
+     "FAIL *a3"
+     "pass *a4"
+     "[-]+"
+     "Tests run: 2   Pass: 1   Fail: 1   Skip: 0"))
+  ;; rerun tests that failed
+  (nonzero-exit
+   (swish-test "--rerun fail " (string-append test-file ".mo"))
+   '(seek
+     "FAIL *a3"
+     "[-]+"
+     "Tests run: 1   Pass: 0   Fail: 1   Skip: 0"))
   ;; filter first by tags and then by exclusion tags
   ;; order on command-line doesn't matter
   (nonzero-exit
@@ -311,6 +350,21 @@
      "pass *a5"
      "[-]+"
      "Tests run: 3   Pass: 3   Fail: 0   Skip: 2"))
+  ;; rerun tests that were skipped, but respect the --not broken tag constraint
+  (nonzero-exit
+   (swish-test "--rerun skip --not broken " (string-append test-file ".mo"))
+   '(seek
+     "SKIP *a3"
+     "pass *a4"
+     "[-]+"
+     "Tests run: 1   Pass: 1   Fail: 0   Skip: 1"))
+  ;; rerun skipped tests in a specified directory
+  (nonzero-exit
+   (swish-test "--rerun skip " (path-parent test-file))
+   '(seek
+     "FAIL *a3"
+     "[-]+"
+     "Tests run: 1   Pass: 0   Fail: 1   Skip: 0"))
   ;; if any test fails, suite summary shows fail
   (nonzero-exit
    (swish-test "--progress suite --tag broken --tag silly " test-file)
@@ -380,7 +434,7 @@
     (format "~a *fail$" (pregexp-quote file3))))
   ;; test --harvest directory processing
   (let ([combined.json (path-combine (output-dir) "combined.json")])
-    (zero-exit
+    (nonzero-exit
      (swish-test "--report " combined.json " --harvest "
        (path-combine (output-dir) test-dir0))
      '("Tests run: 7   Pass: 6   Fail: 1   Skip: 0"))))
@@ -772,6 +826,13 @@
             (mat hangry () (throw 'tantrum))
             (mat deep () (flub 100 'deep))
             (mat shallow () (flub 1 "a fit")))))))
+  (define all-pass
+    (write-test-file "all-pass.ms"
+      (lambda ()
+        (for-each pretty-print
+          `((import (swish mat))
+            (mat one () (assert #t))
+            (mat two () (assert 'yes)))))))
   (define (check data test-name type tags message check-stack)
     (match-let*
      ([,results (mat-data-results data)]
@@ -793,6 +854,7 @@
   (define mo-path2 (string-append test-file2 ".mo"))
   (define mo-path3 (string-append test-file3 ".mo"))
   (define mo-path4 (string-append test-file4 ".mo"))
+  (define mo-all-pass (string-append all-pass ".mo"))
   (define (get-data content)
     (match-let* ([(,_ ,data) (pregexp-match "<script>var data = (.*);</script><script>\n  function escapeHtml" content)])
       (json:string->object data)))
@@ -802,6 +864,10 @@
   (define (find-test name obj)
     (find (lambda (r) (eq? name (mat-result-test r)))
       (mat-data-results obj)))
+  ;; case where all tests pass
+  (zero-exit (swish-test "--progress none " all-pass) '())
+  (zero-exit (swish-test "--progress none --harvest " mo-all-pass) '())
+  ;; case where some tests fail
   (nonzero-exit
    (swish-test "--progress none --report " report-file " " test-file)
    '())
@@ -942,6 +1008,8 @@
   (nonzero-exit
    (swish-test "--progress none --tag good --report " report-file1 " " test-file)
    '())
+  ;; same exit status when we harvest those results
+  (nonzero-exit (swish-test "--progress none --harvest " mo-path1) '())
   ;; check HTML report output
   (match-let*
    ([#t (file-exists? report-file1)]
@@ -955,6 +1023,8 @@
   (zero-exit
    (swish-test "--progress none --tag good --report " report-file2 " " test-file " TEST1")
    '())
+  ;; same exit code when we --harvest those results [questionable but consistent]
+  (zero-exit (swish-test "--progress none --harvest " mo-path1) '())
   ;; check HTML report output
   (match-let*
    ([#t (file-exists? report-file2)]
@@ -1021,25 +1091,92 @@
      (swish-test "--progress none --not tag1 " test-file)
      '())
     ;; --harvest alone prints summary and incomplete notice
-    (zero-exit
+    (nonzero-exit
      (swish-test "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete)
      summary-output)
     ;; --harvest for report also prints summary and incomplete notice
-    (zero-exit
+    (nonzero-exit
      (swish-test
       "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete
       " --report " aggregate.json)
      summary-output)
     ;; --load-results alone prints summary and incomplete notice
-    (zero-exit
+    (nonzero-exit
      (swish-test "--load-results " aggregate.json)
      summary-output)
+    (let ([expected
+           `(,(string-append (pregexp-quote test-file) ".* fail")
+             ,(string-append (pregexp-quote test-file2) ".* no tests")
+             ,(string-append (pregexp-quote test-file3) ".* fail")
+             ,(string-append (pregexp-quote "incomplete.ms") ".* no tests")
+             ,@summary-output)])
+      ;; --progress suite with --harvest
+      (nonzero-exit
+       (swish-test
+        "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete " "
+        "--progress " "suite")
+       expected)
+      ;; --progress suite with --load-results
+      (nonzero-exit
+       (swish-test
+        "--progress " "suite "
+        "--load-results " aggregate.json)
+       expected))
+    (let ([expected
+           `(,(pregexp-quote test-file)
+             seek
+             " pass .*TEST1"
+             " SKIP .*TEST2"
+             " FAIL .*TEST3"
+             seek
+             "Tests run: 2   Pass: 1   Fail: 1   Skip: 1"
+             seek
+             ,(pregexp-quote test-file2)
+             seek
+             "Tests run: 0   Pass: 0   Fail: 0   Skip: 0"
+             seek
+             ,(pregexp-quote test-file3)
+             seek
+             " FAIL .*zero"
+             seek
+             "Tests run: 1   Pass: 0   Fail: 1   Skip: 0"
+             seek
+             ,(pregexp-quote "incomplete.ms")
+             seek
+             "Tests run: 0   Pass: 0   Fail: 0   Skip: 0"
+             seek
+             ,@summary-output)])
+      ;; --progress test with --harvest
+      (nonzero-exit
+       (swish-test
+        "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete " "
+        "--progress " "test")
+       expected)
+      ;; --progress test with --load-results
+      (nonzero-exit
+       (swish-test
+        "--progress " "test "
+        "--load-results " aggregate.json)
+       expected))
+    (let ([expected '(seek "Some test suite did not complete")])
+      ;; --progress none with --harvest
+      (nonzero-exit
+       (swish-test
+        "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete " "
+        "--progress " "none")
+       expected)
+      ;; --progress none with --load-results
+      (nonzero-exit
+       (swish-test
+        "--progress " "none "
+        "--load-results " aggregate.json)
+       expected))
     ;; --load-results and --report generating HTML output prints same summary
-    (zero-exit
+    (nonzero-exit
      (swish-test "--load-results " aggregate.json " --report " aggregate.html)
      (cons "see file:.*aggregate.html" summary-output))
     ;; can generate same HTML report via --harvest and --report
-    (zero-exit
+    (nonzero-exit
      (swish-test
       "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete
       " --report " alt.html)
@@ -1073,7 +1210,7 @@
                  [else (json:write op x 0)])
                 (f))))))
       (on-exit (delete-file fake-file)
-        (zero-exit
+        (nonzero-exit
          (swish-test
           "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete
           " --info")
@@ -1081,7 +1218,7 @@
            "^$"
            ,(fmt info 'chezscheme)
            ,(fmt info 'swish)))
-        (zero-exit
+        (nonzero-exit
          (swish-test
           "--harvest " mo-path1 " " mo-path2 " " mo-path3 " " incomplete
           " " fake-file
