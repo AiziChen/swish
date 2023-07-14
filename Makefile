@@ -1,11 +1,8 @@
 MAKEFLAGS += --no-print-directory
-.PHONY: clean coverage check-docs doc install pristine swish test
+.PHONY: clean coverage install pristine swish test
 
 swish: src/swish/Makefile
 	$(MAKE) -C src/swish all
-
-doc:
-	$(MAKE) -C doc
 
 src/swish/Makefile:
 	@echo "Run ./configure to create $@"
@@ -22,14 +19,10 @@ coverage: src/swish/Makefile
 check-astyle:
 	@(astyle --project $$(git ls-files '*.c' '*.h' | grep -v 'sqlite3'))
 
-check-docs: src/swish/Makefile
-	@(cd src; ./go check-docs -uD -e '^osi_.*\*' -e '^[A-Z_]+' -e '^\$$[a-z-]+' -e '^event-mgr:unregister' ../doc)
-
-install: swish doc
+install: swish
 	$(MAKE) -C src/swish install
 
 clean: src/swish/Makefile
-	$(MAKE) -C doc clean
 	$(MAKE) -C src/swish clean
 
 pristine: clean
