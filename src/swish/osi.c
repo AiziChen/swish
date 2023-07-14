@@ -526,6 +526,7 @@ static void connect_tcp_cb(uv_connect_t* req, int status) {
         return;
       }
       p->ai = ai->ai_next;
+      uv_tcp_keepalive(&(p->stream_port->h.tcp), 0, 0);
       status = uv_tcp_connect(&(p->connect), &(p->stream_port->h.tcp), ai->ai_addr, connect_tcp_cb);
     } while (status < 0);
     return;
@@ -549,6 +550,7 @@ static void connect_tcp_addrinfo_cb(uv_getaddrinfo_t* req, int status, struct ad
     return;
   }
   p->ai = res->ai_next;
+  uv_tcp_keepalive(&(p->stream_port->h.tcp), 0, 0);
   int rc = uv_tcp_connect(&(p->connect), &(p->stream_port->h.tcp), res->ai_addr, connect_tcp_cb);
   if (rc < 0)
     connect_tcp_cb(&(p->connect), rc);
@@ -1146,6 +1148,7 @@ ptr osi_listen_tcp(const char* address, uint16_t port, ptr callback) {
     free(listener);
     return osi_make_error_pair("uv_tcp_init", rc);
   }
+  uv_tcp_keepalive(listener, 0, 0);
   rc = uv_tcp_bind(listener, (struct sockaddr*)&addr, 0);
   if (rc < 0) {
     uv_close((uv_handle_t*)listener, close_handle_data_cb);
