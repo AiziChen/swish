@@ -19,6 +19,9 @@ coverage: src/swish/Makefile
 check-astyle:
 	@(astyle --project $$(git ls-files '*.c' '*.h' | grep -v 'sqlite3'))
 
+warn-letrec-check:
+	@WARN_UNDEFINED=yes $(MAKE) -C src/swish all
+
 install: swish
 	$(MAKE) -C src/swish install
 
