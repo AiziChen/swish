@@ -33,6 +33,8 @@
    split-n
    starts-with-ci?
    starts-with?
+   string-contains?
+   string-contains-ci?
    symbol-append
    trim-whitespace
    wrap-text
@@ -106,6 +108,27 @@
              (or (= i p-len)
                  (and (char=? (string-ref s i) (string-ref p i))
                       (lp (+ i 1))))))))
+ 
+  (define (string-contains?-base s p proc)
+    (let ([s-len (string-length s)]
+          [p-len (string-length p)])
+      (and (>= s-len p-len)
+           (let lp ([si 0]
+                    [pi 0])
+             (cond
+               [(= pi p-len) #t]
+               [(= si s-len) #f]
+               [(proc (string-ref s si) (string-ref p pi))
+                (lp (+ si 1) (+ pi 1))]
+               [else
+                (and (< si (- s-len p-len))
+                     (lp (+ si 1) 0))])))))
+
+  (define (string-contains? s p)
+    (string-contains?-base s p char=?))
+ 
+  (define (string-contains-ci? s p)
+    (string-contains?-base s p char-ci=?))
 
   (define (starts-with-ci? s p)
     (let ([s-len (string-length s)]
