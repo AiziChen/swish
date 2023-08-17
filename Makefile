@@ -12,6 +12,11 @@ test: src/swish/Makefile
 	@$(MAKE) -C src/swish mat-prereq
 	@./src/run-mats
 
+safe-check: src/swish/Makefile
+	@touch src/swish/unsafe.ss
+	@UNSAFE_PRIMITIVES=no $(MAKE) -C src/swish mat-prereq
+	@./src/run-mats
+
 coverage: src/swish/Makefile
 	@PROFILE_MATS=yes $(MAKE) -C src/swish mat-prereq
 	@PROFILE_MATS=yes ./src/run-mats
