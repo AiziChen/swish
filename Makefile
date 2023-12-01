@@ -27,8 +27,8 @@ check-astyle:
 warn-letrec-check:
 	@WARN_UNDEFINED=yes $(MAKE) -C src/swish all
 
-install: swish
-	$(MAKE) -C src/swish install
+install: swish doc
+	$(MAKE) -C src/swish install install-batteries
 
 clean: src/swish/Makefile
 	$(MAKE) -C src/swish clean
