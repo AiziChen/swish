@@ -390,7 +390,9 @@
     ;; check int64 error during sqlite:marshal-bindings
     [,too-large (ash 1 64)]
     [,expected-error
-     (format "Exception in Sinteger64_value: ~a is out of range." too-large)]
+     (if (pregexp-match ".*HAS_TRY_INT64_VALUE.*" (utf8->string (read-file "src/swish/scheme_aux.h")))
+         (exit-reason->english `#(osi-error osi_marshal_bindings osi_marshal_bindings ,UV_EINVAL))
+         (format "Exception in Sinteger64_value: ~a is out of range." too-large))]
     [#(EXIT ,reason)
      (catch (sqlite:marshal-bindings (list too-large)))]
     [,@expected-error (exit-reason->english reason)]
@@ -416,6 +418,8 @@
     [,@stmts-before (statement-count)]
     [#(EXIT #(bad-arg db:start&link "options"))
      (catch (db:start&link #f ":memory:" 'open "options"))]
+    [#(EXIT #(bad-arg db:start "options"))
+     (catch (db:start #f ":memory:" 'open "options"))]
     [,name (gensym)]
     [,_
      (db:start&link name ":memory:" 'open
@@ -652,32 +656,55 @@
     (assert (handle-gone? (g)))))
 
 (db-mat db-open ()
+  (define (test starter)
+    (match-let*
+     ([,filename
+       (make-directory-path
+        (path-combine (data-dir) "test-db.db3"))]
+      [#(ok ,file) (starter #f filename 'create)]
+      [#(ok ,tmp) (starter #f "" 'create)]
+      [#(ok ,mem) (starter #f ":memory:" 'create)]
+      [#(ok ,shared1) (starter #f "file::memory:?cache=shared" 'create)]
+      [#(ok ,shared2) (starter #f "file::memory:?cache=shared" 'create)]
+      [#(ok ,init)
+       (starter #f ":memory:" 'create
+         (let ([me self])
+           (lambda (db)
+             (send me `#(init ,(execute-sql db "pragma journal_mode"))))))]
+      [#(init (#("memory"))) (receive (after 1000 (throw 'timeout)) [,x x])])
+
+     ;; Verify in-memory using shared cache connects to same data
+     (transaction shared1
+       (execute "CREATE TABLE table1 (col1, col2, col3)")
+       (execute "INSERT INTO table1 (col1, col2, col3) VALUES(?,?,?)" 1 2 3))
+     (match-let*
+      ([(#(1 2 3))
+        (transaction shared2 (execute "SELECT col1, col2, col3 FROM table1"))])
+
+      (for-each db:stop (list file tmp mem shared1 shared2 init))
+      (catch (remove-file filename)))))
+  (test db:start&link)
+  (test db:start))
+
+(db-mat db-link ()
+  ;; Start a db gen-server and monitor it. Send a nonsense message that
+  ;; causes handle-info to fail. Verify the server is linked
+  ;; appropriately.
+  (define (test starter)
+    (match-let*
+     ([#(ok ,pid) (starter #f ":memory:" 'create)]
+      [,m (monitor pid)]
+      [,nonsense (gensym "nonsense")])
+     (send pid nonsense)
+     (receive (after 1000 'timeout)
+       [`(EXIT ,@pid #(bad-match ,@nonsense ,_)) 'linked]
+       [`(DOWN ,@m ,@pid ,reason) 'not-linked]
+       [`(EXIT ,@pid ,reason) reason])))
+  (process-trap-exit #t)
   (match-let*
-   ([,filename
-     (make-directory-path
-      (path-combine (data-dir) "test-db.db3"))]
-    [#(ok ,file) (db:start&link #f filename 'create)]
-    [#(ok ,tmp) (db:start&link #f "" 'create)]
-    [#(ok ,mem) (db:start&link #f ":memory:" 'create)]
-    [#(ok ,shared1) (db:start&link #f "file::memory:?cache=shared" 'create)]
-    [#(ok ,shared2) (db:start&link #f "file::memory:?cache=shared" 'create)]
-    [#(ok ,init)
-     (db:start&link #f ":memory:" 'create
-       (let ([me self])
-         (lambda (db)
-           (send me `#(init ,(execute-sql db "pragma journal_mode"))))))]
-    [#(init (#("memory"))) (receive (after 1000 (throw 'timeout)) [,x x])])
-
-   ;; Verify in-memory using shared cache connects to same data
-   (transaction shared1
-     (execute "CREATE TABLE table1 (col1, col2, col3)")
-     (execute "INSERT INTO table1 (col1, col2, col3) VALUES(?,?,?)" 1 2 3))
-   (match-let*
-    ([(#(1 2 3))
-      (transaction shared2 (execute "SELECT col1, col2, col3 FROM table1"))])
-
-    (db:stop file)
-    (catch (remove-file filename)))))
+   ([linked (test db:start&link)]
+    [not-linked (test db:start)])
+   'ok))
 
 (db-mat retry ()
   (capture-events)
@@ -963,7 +990,8 @@
              (pregexp-quote (format "#<bindings ~s>" datum))
              (pregexp-quote ")")))
           output)))
-      data))))
+      data))
+   (gc)))
 
 (db-mat check-options ()
   (match-let*

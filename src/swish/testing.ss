@@ -20,6 +20,7 @@
 ;;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 ;;; DEALINGS IN THE SOFTWARE.
 
+#!chezscheme
 (library (swish testing)
   (export
    $run-test-spec
@@ -28,10 +29,12 @@
    assert-syntax-error
    capture-events
    default-timeout
+   define-environment-parameters
    delete-tree
    discard-events
    gc
    handle-gone?
+   incorrect-argument-count?
    isolate-mat
    match-prefix
    match-regexps
@@ -41,6 +44,7 @@
    run-test-spec
    scale-timeout
    scheme-exe
+   set-scheme-exe
    sleep-ms
    start-event-mgr
    start-silent-event-mgr
@@ -70,9 +74,26 @@
 
   (profile:exclude)
 
-  (define scheme-exe
-    (or (getenv (if (memq (machine-type) '(a6nt i3nt ta6nt ti3nt)) "SCHEME_WIN" "SCHEME"))
+  (define-syntax scheme-exe (identifier-syntax (get-scheme-exe)))
+
+  (define scheme-environment-variable
+    (if (memq (machine-type) '(a6nt i3nt ta6nt ti3nt)) "SCHEME_WIN" "SCHEME"))
+
+  (define (get-scheme-exe)
+    (or (getenv scheme-environment-variable)
         "scheme"))
+
+  (define (set-scheme-exe filename)
+    (let ([ip (open-file-to-read filename)]
+          [re (pregexp (format "^export ~a='(.*)'" scheme-environment-variable))])
+      (on-exit (close-port ip)
+        (let lp ()
+          (match (get-line ip)
+            [#!eof (void)]
+            [,line
+             (match (pregexp-match re line)
+               [(,_ ,exe) (putenv scheme-environment-variable exe)]
+               [,_ (lp)])])))))
 
   (define-syntax assert-syntax-error
     (syntax-rules ()
@@ -93,6 +114,37 @@
        'ok])
      (eval e)
      (errorf 'assert-syntax-error "failed to raise syntax error: ~s" e)))
+
+  (define arg-count-err-msg
+    (let ([f (lambda (x) x)])
+      (guard (c [else (condition-message c)])
+        ((eval '(lambda (f) (f 1 2 3))) f))))
+
+  (define (incorrect-argument-count? err proc)
+    (define (procedure-name x)
+      (let ([insp (inspect/object x)])
+        (and (eq? (insp 'type) 'procedure)
+             (string->symbol ((insp 'code) 'name)))))
+    (define reason
+      (match err
+        [`(catch ,reason ,_) reason]
+        [,_ err]))
+    (meta-cond
+     [(call-with-values scheme-version-number (lambda (maj min sub) (or (> maj 9) (and (= maj 9) (> min 6)))))
+      (match (condition-irritants reason)
+        [(,_arg-count ,@proc) 'ok]
+        [(,_arg-count ,x)
+         (guard (eq? proc (procedure-name x)))
+         'ok])]
+     [else
+      (match (condition-irritants reason)
+        [(,@proc) 'ok]
+        [(,x)
+         (guard (eq? proc (procedure-name x)))
+         'ok])])
+    (match-let*
+     ([,@arg-count-err-msg (condition-message reason)])
+     #t))
 
   (define (sleep-ms t) (receive (after t 'ok)))
 
@@ -471,8 +523,8 @@
                           [(,library ,name ,exports ,imports . ,rest)
                            (guard (eq? 'library (annotation-expression library)))
                            `(,library ,name ,exports ,imports
-                              ,@(map (lambda (x) `(export ,x)) to-expose)
-                              ,@rest)]
+                             ,@(map (lambda (x) `(export ,x)) to-expose)
+                             ,@rest)]
                           [,_ x]))))
                    (set-top-level-value! 'load-this
                      (lambda () (help-load eval)))
@@ -484,5 +536,16 @@
           (match (path-extension test-file)
             ["ms" (do-mats source-offset)]
             [,_ (do-source source-offset)])))))
+
+  (define-syntax define-environment-parameters
+    (syntax-rules ()
+      [(_ NAME ...)
+       (begin
+         (define NAME
+           (let ([var (symbol->string 'NAME)])
+             (case-lambda
+              [() (getenv var)]
+              [(x) (when (string? x) (putenv var x))])))
+         ...)]))
 
   )

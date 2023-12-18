@@ -26,6 +26,8 @@
  (swish testing)
  )
 
+(set-scheme-exe "src/swish/sh-config")
+
 (define swish-build
   (get-real-path (path-combine (prereq-path) "swish-build")))
 
@@ -158,7 +160,7 @@
             (match-regexps `patterns stderr)])
          ...)]))
   (expect-errors
-   [("swish-build: unexpected eof in fasl file.*")
+   [("swish-build: (unexpected eof in fasl file|malformed fasl-object header).*")
     (swish-build-test `("--library" "-o" "fail" ,empty) '())]
    [("swish-build: expected .*library form, but encountered.*")
     (swish-build-test `("--library" "-o" "fail" ,non-lib) '())]
@@ -177,9 +179,10 @@
    )
   ;; empty program or component is okay; silly, but okay
   (match-let*
-   ([() (swish-build-test `("-c" "-o" "empty" ,empty) '())]
-    [() (swish-build-test `("-o" "empty" ,empty) '())]
-    [() (swish-build-test `("-o" "empty" ,empty "-b" "petite") '())])
+   ([,dest (path-combine (output-dir) "empty")]
+    [() (swish-build-test `("-c" "-o" ,dest ,empty) '())]
+    [() (swish-build-test `("-o" ,dest ,empty) '())]
+    [() (swish-build-test `("-o" ,dest ,empty "-b" "petite") '())])
    'ok)
   )
 
@@ -217,10 +220,24 @@
   (run-fat "fat2" '() '("Hello, World!")))
 
 (isolate-mat fat3 ()
+  (define-environment-parameters SCHEMEHEAPDIRS)
   ;; fat with scheme only
   (write-example "fat3" hello-fat)
   (build-example "fat3" '("-b" "scheme"))
-  (run-fat "fat3" '() '("Hello, World!")))
+  ;; Set SCHEMEHEAPDIRS explicitly since Chez Scheme v10.x changes the default
+  ;; heap search path so that it is relative to the executable. Otherwise the
+  ;; fat3 binary cannot find the system petite.boot.
+  (parameterize ([SCHEMEHEAPDIRS
+                  (let ([base (path-parent scheme-exe)])
+                    (join
+                     (list
+                      (path-combine base ".." ".." "boot" "%m")
+                      (path-combine base ".." "lib" "csv%v" "%m")
+                      "")
+                     (meta-cond
+                      [(memq (machine-type) '(a6nt ta6nt i3nt ti3nt)) #\;]
+                      [else #\:])))])
+    (run-fat "fat3" '() '("Hello, World!"))))
 
 (isolate-mat fat-ext ()
   ;; fat with petite, where output filename contains an extension
@@ -439,7 +456,7 @@
        (lib-abc)
        (scheme)
        (swish imports))
-      abc                            ; must reference the export
+      abc                               ; must reference the export
       (printf "abc: ~a\n"
         (top-level-value 'abc (environment '(lib-abc))))))
   (build-example "libsvis-fat"
@@ -913,9 +930,9 @@
               [stdout ,@common-prefix]
               [stderr (,err-msg)]))
      (assert
-       (or (string=? err-msg "prog1: variable say is not bound.")
-           ;; 9.5.3 change in library-manager error messages
-           (string=? err-msg "prog1: attempt to invoke invisible library (lib1).")))
+      (or (string=? err-msg "prog1: variable say is not bound.")
+          ;; 9.5.3 change in library-manager error messages
+          (string=? err-msg "prog1: attempt to invoke invisible library (lib1).")))
      'ok])
 
   ;; table not duplicated when prog2 is loaded and say is visible
@@ -1107,6 +1124,37 @@
               [stderr ("broken-echo: 17 is not a pair.")]))
      'ok])
   )
+
+(isolate-mat claim-exceptions-stderr-closed ()
+  (define default-application-exit-code 2) ;; see app-core.ss
+  (define doomed-writer
+    (write-example "doomed-writer"
+      ;; keep trying to write, but parent closed ports; default exception
+      ;; handler should exit instead of repeatedly trying to write to stderr
+      `((do () (#f)
+          (receive (after 1 (write-char #\x)))
+          (flush-output-port)))))
+  (define (hangup-on-process command args)
+    (let-values ([(to-stdin from-stdout from-stderr os-pid)
+                  (spawn-os-process command args self)])
+      (close-port from-stderr)
+      (close-port from-stdout)
+      ;; typically takes < 150 ms real time, so allow 10x that and then
+      ;; scale for slow macOS build agents
+      (receive (after (scale-timeout 1500) (osi_kill* os-pid SIGKILL) (throw 'ran-too-long))
+        [#(process-terminated ,@os-pid ,exit-status ,signal)
+         (assert (= signal 0))
+         (assert (= exit-status default-application-exit-code))])))
+  ;; run as swish script
+  (hangup-on-process swish-exe `(,doomed-writer))
+  ;; run as thin app
+  (build-example "doomed-writer" '())
+  (hangup-on-process swish-exe `(,(output-file "doomed-writer")))
+  ;; run as fat app
+  (assert (delete-file (output-file "doomed-writer")))
+  (build-example "doomed-writer" '("-b" "petite"))
+  (ensure-dlls)
+  (hangup-on-process (output-file "doomed-writer") '()))
 
 (isolate-mat hash-bang ()
   ;; run one source example three different ways

@@ -103,6 +103,7 @@
    )
   (import
    (chezscheme)
+   (swish compat)
    (swish erlang)
    (swish meta)
    (swish osi)
@@ -150,7 +151,7 @@
                 bv start n fp
                 (let ([p self])
                   (lambda (r)
-                    (#%$keep-live port)
+                    (keep-live port)
                     (set! result r)
                     (complete-io p))))
          [#t
@@ -169,7 +170,7 @@
               bv start n fp
               (let ([p self])
                 (lambda (r)
-                  (#%$keep-live port)
+                  (keep-live port)
                   (set! result r)
                   (complete-io p))))
        [#t
@@ -188,7 +189,7 @@
          (match (osi_close_port* handle
                   (let ([p self])
                     (lambda (result) ;; ignore failures
-                      (#%$keep-live port)
+                      (keep-live port)
                       (complete-io p))))
            [#t
             (osi-ports port #f)
@@ -533,13 +534,13 @@
         (call/1cc
          (lambda (return)
            (parameterize
-               ([keyboard-interrupt-handler
-                 (lambda ()
-                   ;; Ignore when the reader has already responded.
-                   (when (active? cell)
-                     (active?-set! cell #f)
-                     (return 'interrupt)))])
-             (receive [#(,@reader ,r) r])))))])
+            ([keyboard-interrupt-handler
+              (lambda ()
+                ;; Ignore when the reader has already responded.
+                (when (active? cell)
+                  (active?-set! cell #f)
+                  (return 'interrupt)))])
+            (receive [#(,@reader ,r) r])))))])
     (binary->utf8
      (make-custom-binary-input-port "stdin-nb*" r! gp #f close)))
 
@@ -713,7 +714,7 @@
      (match (osi_get_file_size* (get-osi-port-handle 'get-file-size port)
               (let ([p self])
                 (lambda (r)
-                  (#%$keep-live port)
+                  (keep-live port)
                   (set! result r)
                   (complete-io p))))
        [#t
@@ -1035,16 +1036,15 @@
      [(signum)
       (arg-check 'signal-handler [signum fixnum? fxpositive?])
       (with-interrupts-disabled
-        (@signal-handler-callback signum))]
+       (@signal-handler-callback signum))]
      [(signum callback)
       (arg-check 'signal-handler
         [signum fixnum? fxpositive?]
         [callback (lambda (cb) (or (not cb) (procedure? cb)))])
       (with-interrupts-disabled
-       (let* ([cell (hashtable-cell signal-handlers signum #f)]
-              [prev (cdr cell)])
+       (let ([prev (hashtable-ref signal-handlers signum #f)])
          (define (set-handler! signum handle callback)
-           (set-cdr! cell
+           (hashtable-set! signal-handlers signum
              (make-sighandler signum (erlang:now) handle callback)))
          (cond
           [(sighandler? prev)

@@ -332,7 +332,20 @@ if [ "${Windows}" = "yes" ]; then
   check_missing "scheme.h" "$(cygpath -au "${SchemeInclude}")"
 else
   check_missing "scheme.h" "${SchemeInclude}"
-  check_missing "kernel.o" "${SchemeInclude}"
+fi
+
+if [ -f "${SchemeInclude}/kernel.o" ]; then
+  SCHEMELINK="\${SCHEME_LIBPATH}/kernel.o"
+elif [ -f "${SchemeInclude}/libkernel.a" ]; then
+  if [ ! -f "${SchemeInclude}/liblz4.a" ]; then
+    SCHEMELINK="-L\${SCHEME_LIBPATH}/../../lz4/lib "
+  fi
+  if [ ! -f "${SchemeInclude}/liblz4.a" ]; then
+    SCHEMELINK="${SCHEMELINK:-}-L\${SCHEME_LIBPATH}/../../zlib "
+  fi
+  SCHEMELINK="${SCHEMELINK:-}-L\${SCHEME_LIBPATH} -lkernel -llz4 -lz"
+elif [ "${Windows}" = "no" ]; then
+  err "Missing Chez Scheme kernel.o or libkernel.a"
 fi
 
 SWISH_VERSION=$(sed -n 's/^#define SWISH_VERSION \([0-9a-z."]*\)/\1/p' src/swish/swish.h)
@@ -362,6 +375,7 @@ BASE="$(git rev-parse --show-toplevel)"
 SWISH_INCLUDE="${BASE}/src/swish"
 SWISH_LIBPATH="${BASE}/build/release/bin"
 LIBUV_INCLUDE="${BASE}/libuv/include"
+SQLITE_SRCPATH="${BASE}/sqlite"
 case "${CONFIG_UNAME}" in
   CYGWIN_NT-* | MINGW64_NT-* | MSYS_NT-*)
     UvLib=libuv/build/Release
@@ -377,6 +391,7 @@ if [ "${Windows}" = "yes" ]; then
     SWISH_LIBPATH="$(cygpath -aw "${SWISH_LIBPATH}")"
     LIBUV_INCLUDE="$(cygpath -aw "${LIBUV_INCLUDE}")"
     LIBUV_LIBPATH="$(cygpath -aw "${LIBUV_LIBPATH}")"
+    SQLITE_SRCPATH="$(cygpath -aw "${SQLITE_SRCPATH}")"
 fi
 
 set_output "#" src/swish/sh-config
@@ -401,6 +416,10 @@ if [ -n "${SCHEMEHEAPDIRS:-}" ]; then
 fi
 add "SCHEME_INCLUDE:=${SchemeInclude}"
 add "SCHEME_LIBPATH:=${SCHEME_LIBPATH}"
+add "SCHEMEBOOT:=$(${NORMALIZE_PATH} "$(dirname "${PETITE_BOOT}")")"
+if [ -n "${SCHEMELINK:-}" ]; then
+  add "SCHEMELINK:=${SCHEMELINK:-}"
+fi
 if [ "${Windows}" = "yes" ]; then
   add "SCHEME_LIB_PREFIX:=${SchemeLibPrefix}"
   add "SCHEME_REVISION_PATH:=$(cygpath -u "${SchemeInclude}")"
@@ -412,12 +431,23 @@ add "SWISH_LIBPATH:=${SWISH_LIBPATH}"
 add "SWISH_VERSION:=${SWISH_VERSION}"
 add "LIBUV_INCLUDE:=${LIBUV_INCLUDE}"
 add "LIBUV_LIBPATH:=${LIBUV_LIBPATH}"
+add "SQLITE_SRCPATH:=${SQLITE_SRCPATH}"
 add "NORMALIZE_PATH:=${NORMALIZE_PATH}"
 if [ "${CONFIG_UNAME}" = "Darwin" ]; then
   add "GNU_INSTALL:=ginstall"
 else
   add "GNU_INSTALL:=install"
 fi
+# build server may not have GNU make >= 4.4, but we don't use -j there either
+TMPFILE="$(mktemp)"
+echo "target: .WAIT" > "${TMPFILE}"
+if make -qf "${TMPFILE}" 2> /dev/null ; then
+  add "SYNC=.WAIT"
+else
+  add "SYNC="
+  echo "Note: make does not support .WAIT, so make -j may not work."
+fi
+rm "${TMPFILE}"
 
 set_output ";;" src/osi-bootstrap.ss
 if [ "${Windows}" = "yes" ]; then

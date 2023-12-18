@@ -176,16 +176,16 @@
          #'(handler conn request header params))]))
 
   (define (http-listener:start&link name sup init-port url-handler options)
-    (define-state-tuple <http-listener> tcp-listener cache-manager pid->op)
+    (define-state-tuple <http-listener> tcp-listener cache-manager pid->ports)
     (define (init)
       (process-trap-exit #t)
       (match-let* ([#(ok ,cache-mgr) (cache-mgr:start&link sup options)])
         `#(ok ,(<http-listener> make
                  [tcp-listener (listen-tcp "::" init-port self)]
                  [cache-manager cache-mgr]
-                 [pid->op (ht:make process-id eq? process?)]))))
+                 [pid->ports (ht:make process-id eq? process?)]))))
     (define (terminate reason state)
-      ;; Ignore the pid->op table. In the rare event that this
+      ;; Ignore the pid->ports table. In the rare event that this
       ;; gen-server fails, the dispatchers can continue
       ;; processing. The garbage collector will clean up if necessary.
       (close-tcp-listener ($state tcp-listener)))
@@ -211,15 +211,17 @@
                              (conn:start&link cache-mgr ip op options)])
                            (http:handle-input conn url-handler options)))))))])
           (monitor pid)
-          `#(no-reply ,($state copy* [pid->op (ht:set pid->op pid op)])))]
+          `#(no-reply ,($state copy* [pid->ports (ht:set pid->ports pid (cons ip op))])))]
         [#(accept-tcp-failed ,_ ,_ ,_)
          `#(stop ,msg ,state)]
         [`(DOWN ,_ ,pid ,_)
          (cond
-          [(ht:ref ($state pid->op) pid #f) =>
-           (lambda (op)
-             (force-close-output-port op)
-             `#(no-reply ,($state copy* [pid->op (ht:delete pid->op pid)])))]
+          [(ht:ref ($state pid->ports) pid #f) =>
+           (lambda (ports)
+             (match-let* ([(,ip . ,op) ports])
+               (force-close-output-port op)
+               (close-port ip))
+             `#(no-reply ,($state copy* [pid->ports (ht:delete pid->ports pid)])))]
           [else
            `#(no-reply ,state)])]))
     (gen-server:start&link name))
@@ -229,8 +231,8 @@
 
   (define (conn:start&link cache-mgr ip op options)
     (define-state-tuple <conn>
-      input                     ; ready | #(advance ipos) | close
-      output                    ; ready | dirty
+      input                          ; ready | #(advance ipos) | close
+      output                         ; ready | dirty
       )
     (define host (port-name ip))
 
@@ -488,10 +490,10 @@
     ;; interpret the files and a cookie to determine if the result is
     ;; valid to be placed in the cache.
     (define-state-tuple <http-cache>
-      cookie     ; integer
-      mime-types ; #f | file-extension -> media-type
-      pages      ; path -> #(loaded ,handler) | #(loading ,path ,pid ,waiters)
-      watchers   ; (path-watcher ...)
+      cookie     ;; integer
+      mime-types ;; #f | file-extension -> media-type
+      pages      ;; path -> #(loaded ,handler) | #(loading ,path ,pid ,waiters)
+      watchers   ;; (path-watcher ...)
       )
     (define cache-timeout (* 5 60 1000))
     (define empty-ht (ht:make string-ci-hash string-ci=? string?))

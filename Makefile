@@ -23,7 +23,10 @@ check-astyle:
 	@(astyle --project $$(git ls-files '*.c' '*.h' | grep -v 'sqlite3'))
 
 check-docs: src/swish/Makefile
-	@(cd src; ./go check-docs -uD -e '^osi_.*\*' -e '^[A-Z_]+' -e '^\$$[a-z-]+' -e '^event-mgr:unregister' ../doc)
+	@(cd src; ./go check-docs -uD -e '^osi_.*\*' -e '^[A-Z_]+' -e '^\$$[a-z-]+' -e '^event-mgr:unregister' ..)
+
+warn-letrec-check:
+	@WARN_UNDEFINED=yes $(MAKE) -C src/swish all
 
 install: swish doc
 	$(MAKE) -C src/swish install

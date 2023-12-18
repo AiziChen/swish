@@ -84,6 +84,7 @@
    )
   (import
    (chezscheme)
+   (swish compat)
    (swish internal)
    (swish meta)
    (swish osi)
@@ -140,6 +141,8 @@
           #f
           #f)]))
 
+  (define erlang:now osi_get_time)
+
   (define-syntax self
     (identifier-syntax
      (#3%$top-level-value '#{self lgnnu3lheosakvgyylzmvq5uw-0})))
@@ -167,6 +170,17 @@
      (lambda (new)
        (lambda (contents)
          ((new) contents)))))
+
+  (define (make-queue)
+    (let ([q (make-q)])
+      (q-prev-set! q q)
+      (q-next-set! q q)
+      q))
+
+  (define (queue-empty? queue)
+    (eq? (q-next queue) queue))
+
+  (define enqueued? q-prev)
 
   (define-record-type mon
     (nongenerative)
@@ -236,8 +250,6 @@
       (if x
           (fxlogbit1 3 (pcb-flags p))
           (fxlogbit0 3 (pcb-flags p)))))
-
-  (define erlang:now osi_get_time)
 
   (define (panic event)
     (on-exit (osi_exit 80)
@@ -346,7 +358,7 @@
   ($import-internal throw)
 
   (define (bad-arg who arg)
-    (throw `#(bad-arg ,who ,arg)))
+    (no-inline throw `#(bad-arg ,who ,arg)))
 
   (define (kill p raw-reason)
     (unless (pcb? p)
@@ -442,17 +454,6 @@
     (demonitor m)
     (receive (until 0 #t)
       [`(DOWN ,@m ,_ ,_) #t]))
-
-  (define (make-queue)
-    (let ([q (make-q)])
-      (q-prev-set! q q)
-      (q-next-set! q q)
-      q))
-
-  (define (queue-empty? queue)
-    (eq? (q-next queue) queue))
-
-  (define enqueued? q-prev)
 
   (define (@enqueue process queue precedence)
     (when (enqueued? process)
@@ -564,8 +565,8 @@
   (define-syntax (limit-stack x)
     (syntax-case x ()
       [(ls e0 e1 ...)
-       #`($limit-stack (lambda () e0 e1 ...)
-          #,(find-source #'ls))]))
+       ;; thwart cp0 and ensure $limit-stack appears on the stack
+       #`(no-inline $limit-stack (lambda () e0 e1 ...) #,(find-source #'ls))]))
 
   (define (limit-stack? k)
     (and (#3%$continuation? k)
@@ -628,13 +629,13 @@
 
   (define (print-process p op)
     (with-process-details p
-     (lambda (id name spawned state)
-       (fprintf op " ~6d: " id)
-       (when name
-         (display name op)
-         (write-char #\space op))
-       (print-process-state state op)
-       (fprintf op ", spawned ~d\n" spawned))))
+      (lambda (id name spawned state)
+        (fprintf op " ~6d: " id)
+        (when name
+          (display name op)
+          (write-char #\space op))
+        (print-process-state state op)
+        (fprintf op ", spawned ~d\n" spawned))))
 
   (define (with-process-details p k)
     (arg-check 'with-process-details [p pcb?] [k procedure?])
@@ -1050,7 +1051,7 @@
     (with-interrupts-disabled
      (parameterize ([print-graph #t])
        (let ([op (console-error-port)]
-             [ht (or (event-condition-table) (make-eq-hashtable))])
+             [ht (or (event-condition-table) (make-weak-eq-hashtable))])
          (event-condition-table ht)
          (fprintf op "\nDate: ~a\n" (date-and-time))
          (fprintf op "Timestamp: ~a\n" (erlang:now))
@@ -1178,7 +1179,7 @@
       [(_) #f]))
 
   (define (bad-match v src)
-    (throw `#(bad-match ,v ,src)))
+    (no-inline throw `#(bad-match ,v ,src)))
 
   (define extension)
   (define extensions)

@@ -29,6 +29,8 @@
  (swish testing)
  )
 
+(set-scheme-exe "src/swish/sh-config")
+
 (parameterize ([library-extensions '((".ss" . ".so"))])
   (eval '(import (swish internal-testing))))
 
@@ -63,6 +65,7 @@
          ((eval enumerate-libs-expr)
           '((chezscheme)
             (swish app-core)
+            (swish compat)
             (swish erlang)
             (swish errors)
             (swish internal)
@@ -427,9 +430,15 @@
         '((log-file ":memory:")
           (app:start)
           ;; simulate winning race to exit-process with an earlier app:shutdown
-          (#%$set-top-level-value! '$console-input-port 'bogus)
-          (app:shutdown 1)
-          (receive (after 100 (osi_exit 3)))))
+          ;; (all within one expression since we can't read after closing stdin)
+          (let ([p (#%$top-level-value '$console-input-port)])
+            (#%$set-top-level-value! '$console-input-port #f)
+            ;; close port so leak checker is happy
+            (close-port p)
+            ;; poison the value so exit-process has to be careful
+            (#%$set-top-level-value! '$console-input-port 'bogus)
+            (app:shutdown 1)
+            (receive (after 100 (osi_exit 3))))))
       '("expected non-zero exit")))
    [#(EXIT `(<os-process-failed> [exit-status 1] ,stdout ,stderr))
     (match-regexps '("ok") stdout)
@@ -447,21 +456,21 @@
     (write-test-file "script"
       (lambda ()
         (printf "~{~s\n~}\n"
-        '((log-file ":memory:")
-          (app:start)
-          (cdr 7))))))
+          '((log-file ":memory:")
+            (app:start)
+            (cdr 7))))))
   (match (catch (script-test script '() "" '("expected non-zero exit")))
-   [#(EXIT `(<os-process-failed> ,stdout ,stderr))
-    (match-regexps '() stdout)
-    (match-regexps
-     '("^script: 7 is not a pair[.]$"
-       ""
-       "^Date: "
-       "^Timestamp: "
-       #0="Event: #\\(<child-end> .*\\)"
-       seek #0#
-       seek #0# "")
-     stderr)]))
+    [#(EXIT `(<os-process-failed> ,stdout ,stderr))
+     (match-regexps '() stdout)
+     (match-regexps
+      '("^script: 7 is not a pair[.]$"
+        ""
+        "^Date: "
+        "^Timestamp: "
+        #0="Event: #\\(<child-end> .*\\)"
+        seek #0#
+        seek #0# "")
+      stderr)]))
 
 (isolate-mat application-shutdown4 ()
   ;; Test for regression where application doesn't shut down when we
