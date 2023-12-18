@@ -1,4 +1,4 @@
-C = ${CC} -fPIC -Wall -Wextra -Werror -O2 ${CPPFLAGS} ${CFLAGS} ${LDFLAGS}
+C = ${CC} -fPIC -Wall -Wextra -Werror -Ofast ${CPPFLAGS} ${CFLAGS} ${LDFLAGS}
 OsiObj=osi.o sha1.o sqlite.o sqlite3.o
 SystemLibs=-liconv -lm -lncurses
 SwishLibs := ../../${BUILD}/bin/libosi.dylib ../../${BUILD}/lib/swish_kernel.o
