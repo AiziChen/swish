@@ -133,7 +133,6 @@ install-doc: install-check
 	${GNU_INSTALL} --directory "${INSTDOCDIR}"
 	${GNU_INSTALL} --mode=444 ../../LICENSE "${INSTDOCDIR}"
 	${GNU_INSTALL} --mode=444 ../../NOTICE "${INSTDOCDIR}"
-	${GNU_INSTALL} --mode=444 ../../doc/swish.pdf "${INSTDOCDIR}"
 
 install-batteries: install-check
 	${GNU_INSTALL} --directory "${INSTLIBDIR}"
