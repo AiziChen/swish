@@ -23,6 +23,7 @@
 #!chezscheme
 (library (swish io)
   (export
+   $get-bytevector-exactly-n
    <stat>
    <uname>
    binary->utf8
@@ -35,6 +36,7 @@
    force-close-output-port
    foreign-handle-count
    foreign-handle-print
+   get-bytevector-exactly-n
    get-datum/annotations-all
    get-file-size
    get-real-path
@@ -54,6 +56,7 @@
    make-foreign-handle-guardian
    make-osi-input-port
    make-osi-output-port
+   make-tcp-write2
    make-utf8-transcoder
    open-binary-file-to-append
    open-binary-file-to-read
@@ -77,6 +80,7 @@
    path-watcher-create-time
    path-watcher-path
    path-watcher?
+   port->notify-port
    print-foreign-handles
    print-osi-ports
    print-path-watchers
@@ -97,6 +101,7 @@
    stat-directory?
    stat-regular-file?
    tcp-listener-count
+   tcp-nodelay
    watch-path
    with-sfd-source-offset
    write-osi-port
@@ -129,13 +134,23 @@
     ctime
     birthtime)
 
+  ;; decided it was better to add a subtype field than to lose (sealed #t)
   (define-record-type osi-port
     (nongenerative)
     (sealed #t)
     (fields
      (immutable name)
      (immutable create-time)
+     (immutable subtype)
      (mutable handle)))
+
+  ;; Use port-subtype (not _port_subtypes) so we get compile-time checking that
+  ;; element is in the universe while letting everything expand into eq? check.
+  (define-enumeration port-subtype (fd file tcp pipe) _port_subtypes)
+
+  (define (tcp-osi-port? x)
+    (and (osi-port? x)
+         (eq? (osi-port-subtype x) (port-subtype tcp))))
 
   (define (get-osi-port-handle who p)
     (unless (osi-port? p)
@@ -184,17 +199,20 @@
     (unless (osi-port? port)
       (bad-arg 'close-osi-port port))
     (with-interrupts-disabled
-     (let ([handle (osi-port-handle port)])
-       (when handle
-         (match (osi_close_port* handle
-                  (let ([p self])
-                    (lambda (result) ;; ignore failures
-                      (keep-live port)
-                      (complete-io p))))
-           [#t
-            (osi-ports port #f)
-            (wait-for-io (osi-port-name port))]
-           [(,who . ,errno) (io-error (osi-port-name port) who errno)])))))
+     (@close-osi-port port)))
+
+  (define (@close-osi-port port)
+    (let ([handle (osi-port-handle port)])
+      (when handle
+        (match (osi_close_port* handle
+                 (let ([p self])
+                   (lambda (result) ;; ignore failures
+                     (keep-live port)
+                     (complete-io p))))
+          [#t
+           (osi-ports port #f)
+           (wait-for-io (osi-port-name port))]
+          [(,who . ,errno) (io-error (osi-port-name port) who errno)]))))
 
   (define (force-close-output-port op)
     (unless (port-closed? op)
@@ -215,35 +233,81 @@
   (define (binary->utf8 bp)
     (transcoded-port bp (make-utf8-transcoder)))
 
-  (define (make-iport name port close?)
-    (define fp 0)
-    (define (r! bv start n)
-      (let ([count (read-osi-port port bv start n -1)])
-        (set! fp (+ fp count))
-        count))
-    (define (gp) fp)
-    (make-custom-binary-input-port name r! gp #f
-      (and close? (lambda () (close-osi-port port)))))
+  ;; Chez Scheme's custom ports don't provide a way to associate custom data with the port.
+  (define scheme-port->osi-port (make-weak-eq-hashtable))
+  (define (@set-port-osi-port! port osi-port)
+    (cond
+     [(not osi-port) (eq-hashtable-delete! scheme-port->osi-port port)]
+     [(tcp-osi-port? osi-port)
+      (eq-hashtable-set! scheme-port->osi-port port osi-port)]
+     ;; restrict to TCP ports for now
+     [else (void)]))
+
+  (define (@port-osi-port p)
+    (eq-hashtable-ref scheme-port->osi-port p #f))
+
+  (define-syntax maybe-hook
+    (syntax-rules ()
+      [(_ orig-expr notify!-expr)
+       (let ([orig orig-expr] [notify! notify!-expr])
+         (if (not notify!)
+             orig
+             (lambda (bv start n)
+               (let ([count (orig bv start n)])
+                 (notify! count)
+                 count))))]))
+
+  (define @make-iport
+    (case-lambda
+     [(name port close?) (@make-iport name port close? #f 0)]
+     [(name port close? on-r! current-fp)
+      (define fp current-fp)
+      (define (r! bv start n)
+        (let ([count (read-osi-port port bv start n -1)])
+          (set! fp (+ fp count))
+          count))
+      (define (gp) fp)
+      (define (close)
+        (with-interrupts-disabled
+         (@set-port-osi-port! p #f)
+         (when close? (@close-osi-port port))))
+      (define p
+        (make-custom-binary-input-port name (maybe-hook r! on-r!)
+          gp #f close))
+      (@set-port-osi-port! p port)
+      p]))
 
   (define (make-osi-input-port p)
     (unless (osi-port? p)
       (bad-arg 'make-osi-input-port p))
-    (make-iport (osi-port-name p) p #t))
+    (with-interrupts-disabled
+     (@make-iport (osi-port-name p) p #t)))
 
-  (define (make-oport name port)
-    (define fp 0)
-    (define (w! bv start n)
-      (let ([count (write-osi-port port bv start n -1)])
-        (set! fp (+ fp count))
-        count))
-    (define (gp) fp)
-    (define (close) (close-osi-port port))
-    (make-custom-binary-output-port name w! gp #f close))
+  (define @make-oport
+    (case-lambda
+     [(name port) (@make-oport name port #f 0)]
+     [(name port on-w! current-fp)
+      (define fp current-fp)
+      (define (w! bv start n)
+        (let ([count (write-osi-port port bv start n -1)])
+          (set! fp (+ fp count))
+          count))
+      (define (gp) fp)
+      (define (close)
+        (with-interrupts-disabled
+         (@set-port-osi-port! p #f)
+         (@close-osi-port port)))
+      (define p
+        (make-custom-binary-output-port name (maybe-hook w! on-w!)
+          gp #f close))
+      (@set-port-osi-port! p port)
+      p]))
 
   (define (make-osi-output-port p)
     (unless (osi-port? p)
       (bad-arg 'make-osi-output-port p))
-    (make-oport (osi-port-name p) p))
+    (with-interrupts-disabled
+     (@make-oport (osi-port-name p) p)))
 
   (define (open-utf8-bytevector bv)
     (binary->utf8 (open-bytevector-input-port bv)))
@@ -255,6 +319,19 @@
            [ip (binary->utf8 raw-ip)])
       (on-exit (close-port ip)
         (handler ip sfd source-offset))))
+
+  (define ($get-bytevector-exactly-n ip size)
+    (let ([bv (make-bytevector size)])
+      (let ([count (get-bytevector-n! ip bv 0 size)])
+        (if (or (eof-object? count) (not (fx= count size)))
+            (throw 'unexpected-eof)
+            bv))))
+
+  (define (get-bytevector-exactly-n ip size)
+    (arg-check 'get-bytevector-exactly-n
+      [ip input-port? binary-port?]
+      [size fixnum? fxnonnegative?])
+    ($get-bytevector-exactly-n ip size))
 
   (define (get-datum/annotations-all ip sfd bfp)
     (let f ([bfp bfp])
@@ -405,8 +482,11 @@
   (define osi-port-count (foreign-handle-count 'osi-ports))
   (define print-osi-ports (foreign-handle-print 'osi-ports))
 
-  (define (@make-osi-port name handle)
-    (osi-ports (make-osi-port name (erlang:now) handle) handle))
+  (define @make-osi-port
+    (case-lambda
+     [(name handle) (@make-osi-port name handle (port-subtype file))]
+     [(name handle subtype)
+      (osi-ports (make-osi-port name (erlang:now) subtype handle) handle)]))
 
   ;; Path watching
 
@@ -681,7 +761,7 @@
     (with-interrupts-disabled
      (match (osi_open_fd* fd close?)
        [(,who . ,errno) (io-error name who errno)]
-       [,handle (@make-osi-port name handle)])))
+       [,handle (@make-osi-port name handle (port-subtype fd))])))
 
   (define (tilde-expand path)
     (if (and (> (string-length path) 0)
@@ -797,17 +877,25 @@
       (define (gp) fp)
       (define (sp! pos) (set! fp pos))
       (define (close) (close-osi-port port))
-      (let open ([type type])
-        (case type
-          [(binary-input)
-           (make-custom-binary-input-port name r! gp sp! close)]
-          [(binary-output)
-           (make-custom-binary-output-port name w! gp sp! close)]
-          [(binary-append)
-           (make-custom-binary-output-port name a! #f #f close)]
-          [(input) (binary->utf8 (open 'binary-input))]
-          [(output) (binary->utf8 (open 'binary-output))]
-          [(append) (binary->utf8 (open 'binary-append))]))))
+      (define buffer-size (fxmax 4 (file-buffer-size)))
+      (parameterize ([custom-port-buffer-size buffer-size]
+                     [make-codec-buffer
+                      (lambda (bp)
+                        (or (and (input-port? bp)
+                                 (let ([bv (binary-port-input-buffer bp)])
+                                   (and (fx>= (bytevector-length bv) 4) bv)))
+                            (make-bytevector buffer-size)))])
+        (let open ([type type])
+          (case type
+            [(binary-input)
+             (make-custom-binary-input-port name r! gp sp! close)]
+            [(binary-output)
+             (make-custom-binary-output-port name w! gp sp! close)]
+            [(binary-append)
+             (make-custom-binary-output-port name a! #f #f close)]
+            [(input) (binary->utf8 (open 'binary-input))]
+            [(output) (binary->utf8 (open 'binary-output))]
+            [(append) (binary->utf8 (open 'binary-append))])))))
 
   (define (open-file-to-read name)
     (open-file name O_RDONLY 0 'input))
@@ -863,11 +951,11 @@
        [#(,to-stdin ,from-stdout ,from-stderr ,os-pid)
         (values
          (let ([name (format "process ~d stdin" os-pid)])
-           (make-oport name (@make-osi-port name to-stdin)))
+           (@make-oport name (@make-osi-port name to-stdin (port-subtype pipe))))
          (let ([name (format "process ~d stdout" os-pid)])
-           (make-iport name (@make-osi-port name from-stdout) #t))
+           (@make-iport name (@make-osi-port name from-stdout (port-subtype pipe)) #t))
          (let ([name (format "process ~d stderr" os-pid)])
-           (make-iport name (@make-osi-port name from-stderr) #t))
+           (@make-iport name (@make-osi-port name from-stderr (port-subtype pipe)) #t))
          os-pid)]
        [(,who . ,errno) (io-error path who errno)])))
 
@@ -949,10 +1037,10 @@
                           (send process
                             `#(accept-tcp-failed ,listener ,(car r) ,(cdr r)))
                           (let* ([name (@safe-get-ip-address r "")]
-                                 [port (@make-osi-port name r)])
+                                 [port (@make-osi-port name r (port-subtype tcp))])
                             (send process
-                              `#(accept-tcp ,listener ,(make-iport name port #f)
-                                  ,(make-oport name port)))))
+                              `#(accept-tcp ,listener ,(@make-iport name port #f)
+                                  ,(@make-oport name port)))))
                       (unless (pair? r)
                         (osi_close_port* r 0))))))
        [(,who . ,errno)
@@ -987,7 +1075,7 @@
                   (lambda (r)
                     (if (pair? r)
                         (set! result r)
-                        (set! result (@make-osi-port (@safe-get-ip-address r name) r)))
+                        (set! result (@make-osi-port (@safe-get-ip-address r name) r (port-subtype tcp))))
                     (complete-io p))))
          [#t
           (wait-for-io name)
@@ -995,7 +1083,96 @@
             [(,who . ,errno) (io-error name who errno)]
             [,port
              (let ([name (osi-port-name port)])
-               (values (make-iport name port #f) (make-oport name port)))])]))))
+               (values (@make-iport name port #f) (@make-oport name port)))])]))))
+
+  (define (reuse-or-make-new-buffer p get-buffer)
+    (define (reuse-or-make orig get-length make-new copy!)
+      (let ([len (get-length orig)])
+        (if (fx>= len target-len)
+            orig
+            (let ([new (make-new target-len)])
+              (copy! orig 0 new 0 len)
+              new))))
+    (define orig (get-buffer p))
+    (define target-len (custom-port-buffer-size))
+    (cond
+     [(bytevector? orig)
+      (reuse-or-make orig bytevector-length make-bytevector bytevector-copy!)]
+     [else not-reached]))
+
+  (define (port->notify-port p notify!)
+    (define who 'port->notify-port)
+    (with-interrupts-disabled
+     (let ([osi-port (@port-osi-port p)])
+       (define (return new-p)
+         ;; prevent close-port from closing underlying osi-port if we collect p
+         (mark-port-closed! p)
+         (@set-port-osi-port! p #f)
+         (@set-port-osi-port! new-p osi-port)
+         new-p)
+       ;; limited to TCP ports for now
+       (unless (tcp-osi-port? osi-port) (bad-arg who p))
+       (unless (procedure? notify!) (bad-arg who notify!))
+       ;; see Chez Scheme's binary-custom-port-port-position for fp calculations below
+       (cond
+        [(input-port? p)
+         (let* ([fp (- (port-position p) (port-input-count p))]
+                [new-ip (@make-iport (port-name p) osi-port
+                          ;; preserve no close for tcp input port
+                          (not (tcp-osi-port? osi-port))
+                          notify! fp)])
+           (set-port-input-buffer! new-ip
+             (reuse-or-make-new-buffer p port-input-buffer))
+           (set-port-input-size! new-ip (port-input-size p))
+           (set-port-input-index! new-ip (port-input-index p))
+           (return new-ip))]
+        [(output-port? p)
+         (let* ([out-index (port-output-index p)]
+                [fp (- (port-position p) out-index)]
+                [new-op (@make-oport (port-name p) osi-port notify! fp)])
+           (set-port-output-buffer! new-op
+             (reuse-or-make-new-buffer p port-output-buffer))
+           (set-port-output-size! new-op (port-output-size p))
+           (set-port-output-index! new-op out-index)
+           (return new-op))]
+        [else not-reached]))))
+
+  (define (make-tcp-write2 op)
+    (define who 'make-tcp-write2)
+    (with-interrupts-disabled
+     (let ([osi-port (@port-osi-port op)])
+       (unless (and (tcp-osi-port? osi-port) (output-port? op))
+         (bad-arg who op))
+       (mark-port-closed! op)
+       (rec tcp-write2
+         (case-lambda
+          [() (close-osi-port osi-port)]
+          [(bv1 bv2) (tcp-write2 bv1 bv2 0 (bytevector-length bv2))]
+          [(bv1 bv2 start2 length2)
+           (define result)
+           (with-interrupts-disabled
+            (match (osi_tcp_write2* (get-osi-port-handle 'tcp-write2 osi-port)
+                     bv1 bv2 start2 length2
+                     (let ([p self])
+                       (lambda (r)
+                         (keep-live osi-port)
+                         (set! result r)
+                         (complete-io p))))
+              [#t
+               (wait-for-io (osi-port-name osi-port))
+               (if (>= result 0)
+                   result
+                   (io-error (osi-port-name osi-port) 'osi_tcp_write2 result))]
+              [(,who . ,errno)
+               (io-error (osi-port-name osi-port) who errno)]))])))))
+
+  (define (tcp-nodelay port enabled?)
+    (arg-check 'tcp-nodelay [port output-port?])
+    (with-interrupts-disabled
+     (let ([osi-port (@port-osi-port port)])
+       (unless (tcp-osi-port? osi-port)
+         (errorf 'tcp-nodelay "invalid port ~s" port))
+       (osi_tcp_nodelay (osi-port-handle osi-port) enabled?))))
 
   (define-record-type sighandler
     (nongenerative)

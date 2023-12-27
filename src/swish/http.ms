@@ -104,7 +104,7 @@
          (my-respond
           (http:call-with-ports conn
             (lambda (ip op)
-              (get-bytevector-n ip
+              (get-bytevector-exactly-n ip
                 (string->number
                  (or (find-param "count")
                      (http:get-header "Content-Length" header)))))
@@ -255,7 +255,7 @@
     (let* ([status (http:read-status ip 4096)]
            [header (http:read-header ip 1048576)]
            [len (http:get-content-length header)]
-           [content (and len (f (get-bytevector-n ip len)))])
+           [content (and len (f (get-bytevector-exactly-n ip len)))])
       (<response> make
         [status status]
         [header header]
@@ -268,7 +268,7 @@
   (parse-response (test input) bytevector->sexpr))
 
 (define internal-server-error
-  "HTTP/1.1 500 \r\nContent-Length: 167\r\nCache-Control: no-cache\r\n\r\n<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>Internal server error</title></head><body><h1>The server was unable to complete the request.</h1></body></html>")
+  "HTTP/1.1 500 \r\nContent-Length: 177\r\nCache-Control: no-cache\r\n\r\n<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>Internal server error</title></head><body><h1>The server was unable to complete the request.</h1></body></html>")
 
 (http-mat handlers ()
   ;; The request-timeout option should be relatively short (500ms) for
@@ -1197,8 +1197,13 @@
     (receive (after 1000 (throw 'get-msg-timeout))
       [#(ws:message ,@from ,msg) msg]))
 
-  (define (send/expect p1 p2 data)
-    (ws:send p1 data)
+  (define (send/expect do-send p1 p2 data)
+    ;; ws:send! is destructive only if data is a bytevector;
+    ;; for strings, we have to convert to utf8 in either case
+    (do-send p1
+      (if (and (eq? do-send ws:send!) (bytevector? data))
+          (bytevector-copy data)
+          data))
     (assert (equal? data (get-msg p2))))
 
   (define primes '(7 11 13 239 241 251))
@@ -1209,8 +1214,12 @@
      (lambda (prime)
        (for-each
         (lambda (size)
-          (send/expect p1 p2 (build-buffer size (make-byte-stream prime)))
-          (send/expect p1 p2 (build-string size (make-byte-stream prime))))
+          (let ([buffer (build-buffer size (make-byte-stream prime))])
+            (send/expect ws:send p1 p2 buffer)
+            (send/expect ws:send! p1 p2 buffer))
+          (let ([str (build-string size (make-byte-stream prime))])
+            (send/expect ws:send p1 p2 str)
+            (send/expect ws:send! p1 p2 str)))
         buffer-sizes))
      primes))
 
@@ -1346,7 +1355,9 @@
     [#(EXIT #(bad-arg ws:send a))
      (catch (ws:send 'test 'a))]
     [#(EXIT #(bad-arg ws:send 0))
-     (catch (ws:send 'test 0))])
+     (catch (ws:send 'test 0))]
+    [#(EXIT #(bad-arg ws:send! 12))
+     (catch (ws:send! 'test 12))])
    'ok))
 
 (http-mat websocket-linking ()
@@ -1414,9 +1425,9 @@
         (let ([str (make-string (+ max-size 1) #\b)])
           (ws:send c str)
           (receive (after 1000 (throw 'no-server-close))
-            [#(ws:closed ,@s 1002 ,_) 'ok]))
+            [#(ws:closed ,@s 1009 ,_) 'ok]))
         (receive (after 1000 (throw 'no-client-close))
-          [#(ws:closed ,@c 1002 ,_) 'ok]
+          [#(ws:closed ,@c 1009 ,_) 'ok]
           [#(ws:closed ,@c 1001 ,_)
            ;; When the message size is large, it is likely the server
            ;; side closes the connection, and the client side fails
@@ -1456,6 +1467,32 @@
         [#(ws:init ,s)
          (receive (after 1000 (throw 'no-server-close))
            [#(ws:closed ,@s 1002 "no response from ping") 'ok])]))))
+
+(http-mat websocket-pong ()
+  ;; Send multiple pings, fail if pong is not processed.
+  (define me self)
+  (capture-events)
+  (supervisor:start&link 'http-sup 'one-for-all 0 1
+    (http:configure-server #f 0
+      (http:url-handler
+       (ws:upgrade conn request me
+         (ws:options
+          [ping-frequency 100]
+          [pong-timeout 1000])))))
+  (let* ([c (ws:connect "127.0.0.1" (get-http-port) "/" self)]
+         [_ (receive [#(ws:init ,@c) 'ok])]
+         [s (receive [#(ws:init ,s) s])])
+    ;; This delay needs to be more than the pong-timeout.
+    (receive (after 2000 'ok))
+    (ws:close c)
+    (receive (after 1000 (throw 'no-client-close))
+      [#(ws:closed ,@c 1000 "") 'ok]
+      [#(ws:closed ,@c ,code ,reason)
+       (throw `#(client-closed-for-bad-reason ,code ,reason))])
+    (receive (after 1000 (throw 'no-server-close))
+      [#(ws:closed ,@s 1000 "") 'ok]
+      [#(ws:closed ,@s ,code ,reason)
+       (throw `#(server-closed-for-bad-reason ,code ,reason))])))
 
 (http-mat websocket-client-connect-errors ()
   (define (do-test req)

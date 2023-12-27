@@ -111,13 +111,6 @@
          (lambda () b1 b2 ...)
          (lambda () finally))]))
 
-  (define-syntax no-interrupts
-    (syntax-rules ()
-      [(_ body ...)
-       (let ([x (begin (disable-interrupts) body ...)])
-         (enable-interrupts)
-         x)]))
-
   (define-syntax (receive x)
     (syntax-case x ()
       [(_ (after timeout t1 t2 ...) (pattern b1 b2 ...) ...)
@@ -356,6 +349,7 @@
         thunk))))
 
   ($import-internal throw)
+  (include "unsafe.ss")
 
   (define (bad-arg who arg)
     (no-inline throw `#(bad-arg ,who ,arg)))
@@ -1640,6 +1634,32 @@
   (define-syntax redefine
     (syntax-rules ()
       [(_ var e) (#%$set-top-level-value! 'var e)]))
+
+  (define-syntax define-or-redefine
+    (syntax-rules ()
+      [(_ var stub e)
+       (meta-cond
+        [(top-level-bound? 'var) (module () (redefine var e))]
+        [else
+         (define var (let ([var (lambda () stub)]) e))
+         (export var)])]))
+
+  ;; switch to redefine when we drop support for v9.5.8
+  (define-or-redefine make-codec-buffer
+    (lambda (bp) (make-bytevector 4))
+    (make-process-parameter (make-codec-buffer)
+      (lambda (x)
+        (unless (procedure? x)
+          (bad-arg 'make-codec-buffer x))
+        x)))
+
+  ;; switch to redefine when we drop support for v9.5.8
+  (define-or-redefine transcoded-port-buffer-size 1024
+    (make-process-parameter (transcoded-port-buffer-size)
+      (lambda (x)
+        (unless (and (fixnum? x) (fxpositive? x))
+          (bad-arg 'transcoded-port-buffer-size x))
+        x)))
 
   (define event-condition-table (make-parameter #f))
   (define (reset-console-event-handler) (event-condition-table #f))

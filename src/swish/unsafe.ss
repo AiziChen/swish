@@ -1,4 +1,4 @@
-;;; Copyright 2018 Beckman Coulter, Inc.
+;;; Copyright 2023 Beckman Coulter, Inc.
 ;;;
 ;;; Permission is hereby granted, free of charge, to any person
 ;;; obtaining a copy of this software and associated documentation
@@ -20,41 +20,28 @@
 ;;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 ;;; DEALINGS IN THE SOFTWARE.
 
-(library (swish imports)
-  (export)
-  (import (chezscheme))
-  (export
-   (import
-    (swish app)
-    (swish app-core)
-    (swish app-io)
-    (swish application)
-    (swish base64)
-    (swish cli)
-    (swish db)
-    (swish digest)
-    (swish dsm)
-    (swish erlang)
-    (swish errors)
-    (swish event-mgr)
-    (swish events)
-    (swish foreign)
-    (swish gatekeeper)
-    (swish gen-server)
-    (swish ht)
-    (swish html)
-    (swish http)
-    (swish io)
-    (swish json)
-    (swish log-db)
-    (swish meta)
-    (swish options)
-    (swish osi)
-    (swish pregexp)
-    (swish queue)
-    (swish software-info)
-    (swish statistics)
-    (swish string-utils)
-    (swish supervisor)
-    (swish watcher)
-    (swish websocket))))
+;; This file provides macros that are for internal use only.
+;;
+;; We could pull these in via a library but there is currently no way to unload
+;; a library. In general we can't provide these macros via internal.ss because
+;; that breaks "#!eof mats" since they run after we evaluate boot.ss and poison
+;; $import-internal.
+
+;; Use with care. Build with UNSAFE_PRIMITIVES=no to disable.
+(define-syntax declare-unsafe-primitives
+  (if (equal? (getenv "UNSAFE_PRIMITIVES") "no")
+      (syntax-rules () [(_ ...) (begin)])
+      (syntax-rules ()
+        [(_ prim ...)
+         (begin
+           (define-syntax prim (identifier-syntax ($primitive 3 prim)))
+           ...)])))
+
+;; Use with care. Unlike with-interrupts-disabled, no-interrupts is unsafe if
+;; body forms can raise an exception.
+(define-syntax no-interrupts
+  (syntax-rules ()
+    [(_ body ...)
+     (let ([x (begin (disable-interrupts) body ...)])
+       (enable-interrupts)
+       x)]))

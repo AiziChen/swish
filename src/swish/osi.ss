@@ -123,6 +123,9 @@
    osi_step_statement*
    osi_stop_signal
    osi_stop_signal*
+   osi_tcp_nodelay
+   osi_tcp_nodelay*
+   osi_tcp_write2*
    osi_unlink
    osi_unlink*
    osi_unmarshal_bindings
@@ -189,6 +192,8 @@
   (define-osi osi_write_port (port uptr) (buffer ptr) (start-index size_t) (size unsigned-32) (offset integer-64) (callback ptr))
   (define-osi osi_close_port (port uptr) (callback ptr))
 
+  (define-osi osi_tcp_write2 (port uptr) (bv1 ptr) (bv2 ptr) (start-index2 size_t) (size2 unsigned-32) (callback ptr))
+
   ;; Process
   (fdefine osi_exit (status int) void)
   (define-osi osi_spawn (path string) (args ptr) (callback ptr))
@@ -219,6 +224,7 @@
   (fdefine osi_close_tcp_listener (listener uptr) void)
   (define-osi osi_get_tcp_listener_port (listener uptr))
   (define-osi osi_get_ip_address (port uptr))
+  (define-osi osi_tcp_nodelay (port uptr) (enabled? boolean))
 
   (define (uuid->string uuid)
     (unless (and (bytevector? uuid) (= (bytevector-length uuid) 16))

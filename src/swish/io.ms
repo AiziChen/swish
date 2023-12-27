@@ -53,7 +53,7 @@
   (let* ([me self]
          [reader (spawn&link
                   (lambda ()
-                    (let ([x (get-bytevector-n ip len)])
+                    (let ([x (get-bytevector-exactly-n ip len)])
                       (send me `#(read ,self ,x)))))])
     (receive [#(read ,@reader ,x) x])))
 
@@ -404,6 +404,91 @@
       (g (watch-path test-dir self))
       (gc)
       (assert (handle-gone? (g))))))
+
+;; This test shows why we can't re-use the port's buffer as the codec buffer
+;; for an output port.
+(isolate-mat make-codec-buffer ()
+  (define fill-char #\A)
+  (define test-dir
+    (make-directory-path (path-combine (tmp-dir) "make-codec-buffer")))
+  ;; test reusing port's buffer as codec buffer with multi-byte character
+  ;; encoding at that crosses a buffer boundary
+  (define (check buffer-size)
+    ;; characters with 2-byte, 3-byte, and 4-byte utf-8 encodings
+    (define mischief '(#\δ #\Ⓓ #\🌓))
+    (define bv-len (* 2 buffer-size))
+    (define payload (make-bytevector bv-len))
+    (for-each
+     (lambda (mb-char)
+       (let* ([mbce-bv (string->utf8 (string mb-char))]
+              [mbce-len (bytevector-length mbce-bv)])
+         ;; try each overlap near buffer boundary
+         (do ([i 0 (+ i 1)]) ((= i mbce-len))
+           (let ([offset (- bv-len i mbce-len)])
+             (bytevector-fill! payload (char->integer fill-char))
+             (bytevector-copy! mbce-bv 0 payload offset mbce-len)
+             (assert (equal? payload (string->utf8 (utf8->string payload))))
+             (parameterize ([file-buffer-size buffer-size]
+                            [custom-port-buffer-size buffer-size])
+               (check-crossing payload offset mb-char
+                 (- bv-len (- mbce-len 1))))))))
+     mischief))
+  (define (check-crossing payload offset mb-char str-len)
+    (define utf8-file (make-directory-path (path-combine test-dir "file.utf8")))
+    ;; write binary file and read as text
+    (let ([bin-op (open-binary-file-to-replace utf8-file)])
+      (on-exit (close-port bin-op)
+        (put-bytevector bin-op payload))
+      (let* ([ip (open-file-to-read utf8-file)]
+             [s (on-exit (close-port ip) (get-string-all ip))])
+        (assert (= (string-length s) str-len))
+        (do ([i 0 (+ i 1)]) ((= i str-len))
+          (match-let* ([,expected (if (= i offset) mb-char fill-char)]
+                       [,@expected (string-ref s i)])
+            'ok)))
+      ;; Check use of port-position for input port.
+      ;;
+      ;; Chez Scheme's custom-binary-port set-position! handler invalidates the
+      ;; buffered data so we call the OS to fill port's buffer (which is also
+      ;; internal codec buffer in Swish) and we can safely decode multi-byte
+      ;; character sequence.
+      (let* ([ip (open-file-to-read utf8-file)]
+             [positions (make-fxvector str-len)])
+        (do ([i 0 (+ i 1)]) ((fx= i str-len))
+          (fxvector-set! positions i (port-position ip))
+          (read-char ip))
+        (do ([i 0 (+ i 1)]) ((fx= i str-len))
+          (let ([j (random str-len)]
+                [tmp (fxvector-ref positions i)])
+            (fxvector-set! positions i (fxvector-ref positions j))
+            (fxvector-set! positions j tmp)))
+        (do ([i 0 (+ i 1)]) ((fx= i str-len))
+          (let ([j (fxvector-ref positions i)])
+            (set-port-position! ip j)
+            (match-let* ([,expected (if (= j offset) mb-char fill-char)]
+                         [,@expected (read-char ip)])
+              'ok)))))
+    ;; write text and read as binary
+    (let ([op (open-file-to-replace utf8-file)])
+      (on-exit (close-port op)
+        (put-string op (utf8->string payload)))
+      (let* ([bip (open-binary-file-to-read utf8-file)]
+             [bv (on-exit (close-port bip) (get-bytevector-all bip))])
+        (match-let* ([,@payload bv])
+          'ok))))
+  (assert (= 1 (bytevector-length (string->utf8 (string fill-char)))))
+  (delete-tree test-dir)
+  (on-exit (delete-tree test-dir)
+    (parameterize ([transcoded-port-buffer-size 1])
+      (check 4) ;; minimum buffer size
+      (check 128)
+      (check 511) ;; not a power of two
+      (check 2048))
+    (parameterize ([transcoded-port-buffer-size 1024])
+      (check 4) ;; minimum buffer size
+      (check 128)
+      (check 511) ;; not a power of two
+      (check 2048))))
 
 (isolate-mat read ()
   (read-bytevector "src/swish/io.ms" (read-file "src/swish/io.ms")))
@@ -1025,16 +1110,219 @@
        (match-let*
         ([`(catch #(bad-arg fn bad)) (try (fn arg ...))] ...)
         'ok)]))
-  (assert-bad-args
-   [123 (open-file-port 123 O_RDONLY S_IFREG)]
-   [123 (get-real-path 123)]
-   [123 (get-stat 123)]
-   [123 (list-directory 123)]
-   [123 (read-file 123)]
-   [123 (spawn-os-process 123 '() self)]
-   [(oops) (spawn-os-process "nosuchfile" '(oops) self)]
-   [due (spawn-os-process "nosuchfile" '() 'due)]
-   [123 (spawn-os-process-detached 123 '())]
-   [(oops) (spawn-os-process-detached"nosuchfile" '(oops))]))
+  (define listener (listen-tcp "::1" 0 self))
+  (define-values (cip cop)
+    (connect-tcp
+     (listener-address listener)
+     (listener-port-number listener)))
+  (on-exit (begin (close-port cip) (close-port cop) (close-tcp-listener listener))
+    (assert-bad-args
+     [123 (open-file-port 123 O_RDONLY S_IFREG)]
+     [123 (get-real-path 123)]
+     [123 (get-stat 123)]
+     [123 (list-directory 123)]
+     [123 (read-file 123)]
+     [123 (spawn-os-process 123 '() self)]
+     [(oops) (spawn-os-process "nosuchfile" '(oops) self)]
+     [due (spawn-os-process "nosuchfile" '() 'due)]
+     [123 (spawn-os-process-detached 123 '())]
+     [(oops) (spawn-os-process-detached"nosuchfile" '(oops))]
+     [,cip (make-tcp-write2 cip)])))
+
+(isolate-mat notify-port ()
+  (define-syntax foreach
+    (syntax-rules ()
+      [(_ ([v ls] ...) e0 e1 ...)
+       (for-each (lambda (v ...) e0 e1 ...) ls ...)]))
+  (define checked-error-case? #f)
+  (define (test-tcp data cpbs-before cpbs-after chunks)
+    (define size (bytevector-length data))
+    (define chunk-size (max 1 (quotient size chunks)))
+    (define-syntax do-write
+      (syntax-rules ()
+        [(_ op check-n check-calls)
+         (let* ([n (put-bytevector-some op data 0 chunk-size)]
+                [! (when (zero? (port-output-index op))
+                     ;; initial write flushed buffer before we were instrumented, so update check-n
+                     (set! check-n (+ check-n n)))]
+                [fp (port-position op)]
+                [new-op
+                 ;; instrument port while we may have some buffered data
+                 (port->notify-port op
+                   (lambda (count)
+                     (set! check-calls (+ check-calls 1))
+                     (set! check-n (+ check-n count))))])
+           (assert (port-closed? op))
+           (assert (= fp (port-position new-op)))
+           (let lp ([n n])
+             (let ([remaining (- size n)])
+               (when (> remaining 0)
+                 (let ([block-size (min remaining chunk-size)])
+                   (lp (+ n (put-bytevector-some new-op data n block-size)))))))
+           ;; don't close the port yet; that would also close the input side
+           (flush-output-port new-op)
+           new-op)]))
+    (define-syntax do-read
+      (syntax-rules ()
+        [(_ ip check-n check-calls dest-op)
+         (let* ([bv (get-bytevector-n ip chunk-size)]
+                [! (assert (bytevector? bv))]
+                [n (bytevector-length bv)]
+                [! (set! check-n (+ check-n n))]
+                [! (put-bytevector dest-op bv)]
+                [fp (port-position ip)]
+                [new-ip
+                 ;; instrument port while we may have some buffered data
+                 (port->notify-port ip
+                   (lambda (count)
+                     (set! check-calls (+ check-calls 1))
+                     (set! check-n (+ check-n count))))])
+           (assert (port-closed? ip))
+           (assert (= fp (port-position new-ip)))
+           (let lp ([n n])
+             (let ([remaining (- size n)])
+               (when (> remaining 0)
+                 (let* ([block-size (min remaining chunk-size)]
+                        [bv (get-bytevector-n new-ip block-size)])
+                   (assert (bytevector? bv))
+                   (put-bytevector dest-op bv)
+                   (lp (+ n (bytevector-length bv))))))))]))
+    (define sip-calls 0)
+    (define sop-calls 0)
+    (define cip-calls 0)
+    (define cop-calls 0)
+    (define sip-n 0)
+    (define sop-n 0)
+    (define cip-n 0)
+    (define cop-n 0)
+    (custom-port-buffer-size cpbs-before)
+    (let* ([listener (listen-tcp "::" 0 self)]
+           [test-port (listener-port-number listener)])
+      (on-exit (close-tcp-listener listener)
+        (let-values ([(cip cop) (connect-tcp "::1" test-port)])
+          (unless checked-error-case?
+            (match (try (port->notify-port cip 'bad-proc))
+              [`(catch #(bad-arg port->notify-port bad-proc))
+               (set! checked-error-case? #t)]))
+          (receive (after 5000 (throw 'timeout-connecting-tcp))
+            [#(accept-tcp ,@listener ,sip ,sop)
+             (spawn&link
+              (lambda ()
+                (custom-port-buffer-size cpbs-after)
+                (let-values ([(op get) (open-bytevector-output-port)])
+                  (do-read sip sip-n sip-calls op)
+                  (assert (equal? data (get)))
+                  (close-port (do-write sop sop-n sop-calls)))))])
+          (custom-port-buffer-size cpbs-after)
+          (let ([new-cop (do-write cop cop-n cop-calls)])
+            (let-values ([(op get) (open-bytevector-output-port)])
+              (do-read cip cip-n cip-calls op)
+              (assert (equal? data (get))))
+            (close-port new-cop))
+          (match-let* ([,@size sip-n]
+                       [,@size sop-n]
+                       [,@size cip-n]
+                       [,@size cop-n]
+                       [#t (= sip-calls cip-calls)]
+                       [,low (* sip-calls chunk-size)]
+                       [,high (+ low chunk-size)]
+                       [#t (<= low size high)]
+                       ;; The number of cop-calls and sop-calls is complicated
+                       ;; by Chez Scheme's internal max-put-copy constant. Calls
+                       ;; to put-bytevector-some below a certain size (currently
+                       ;; 256) will copy bytes to the ports buffer without going
+                       ;; through the instrumented w! procedure.
+                       [#t (>= cop-calls 1)]
+                       [#t (>= sop-calls 1)])
+            'ok)))))
+  (define (live-osi-ports) (gc) (osi-port-count))
+  (define original-ports (live-osi-ports))
+  (foreach ([size buffer-sizes])
+    (foreach ([prime primes])
+      (let ([buf (build-buffer size (make-byte-stream prime))])
+        ;; increasing buffer size: allocate new and copy
+        (test-tcp buf 512 1000 7)
+        ;; decreeasing buffer size: reuse original
+        (test-tcp buf 1000 512 7)
+        ;; different number of chunks
+        (test-tcp buf 1000 512 128))))
+  (match-let*
+   ([,bad-port (open-input-string "")]
+    [`(catch #(bad-arg port->notify-port ,@bad-port))
+     (try (port->notify-port bad-port values))]
+    [#t checked-error-case?]
+    ;; check that we collected the osi-ports
+    [#t (<= (live-osi-ports) original-ports)])
+   'ok)
+  )
+
+(isolate-mat get-bytevector-exactly-n ()
+  (define who 'get-bytevector-exactly-n)
+  (match-let*
+   ([,op-misguided
+     (let-values ([(op get) (open-bytevector-output-port)])
+       op)]
+    [,ip-text (open-input-string "")]
+    ;; must be binary input port
+    [`(catch #(bad-arg ,@who ,@op-misguided))
+     (try (get-bytevector-exactly-n op-misguided 7))]
+    [`(catch #(bad-arg ,@who ,@ip-text))
+     (try (get-bytevector-exactly-n ip-text 7))]
+    ;; must be non-negative fixnum
+    [,ip (open-bytevector-input-port '#vu8(0 1 2 3 4 5 6 7 8 9))]
+    [`(catch #(bad-arg ,@who 2.0))
+     (try (get-bytevector-exactly-n ip 2.0))]
+    [`(catch #(bad-arg ,@who -1))
+     (try (get-bytevector-exactly-n ip -1))]
+    ;; success
+    [#vu8(0 1 2) (get-bytevector-exactly-n ip 3)]
+    [#vu8() (get-bytevector-exactly-n ip 0)]
+    [#vu8(3) (get-bytevector-exactly-n ip 1)]
+    [#vu8(4 5 6 7 8 9) (get-bytevector-exactly-n ip 6)]
+    [#vu8() (get-bytevector-exactly-n ip 0)]
+    ;; fail
+    [`(catch unexpected-eof) (try (get-bytevector-exactly-n ip 1))]
+    [#vu8(1 2 3 4) (begin (file-position ip 1) (get-bytevector-exactly-n ip 4))]
+    [`(catch unexpected-eof) (try (get-bytevector-exactly-n ip (+ 1 (port-input-count ip))))]
+    ;; exercise cases where we must call port's r! multiple times
+    ;; success via retry
+    [,byte 0]
+    [,count 10]
+    [,ip (make-custom-binary-input-port "trickle"
+           (lambda (bv start n)
+             (cond
+              [(= count 0) 0]
+              [else
+               (bytevector-u8-set! bv start byte)
+               (set! byte (fxmod (fx+ byte 1) 256))
+               (set! count (- count 1))
+               1]))
+           #f #f #f)]
+    [#vu8(0) (get-bytevector-exactly-n ip 1)]
+    [#vu8(1 2) (get-bytevector-exactly-n ip 2)]
+    [#vu8(3 4 5) (get-bytevector-exactly-n ip 3)]
+    [#vu8(6 7 8 9) (get-bytevector-exactly-n ip 4)]
+    [,test-n
+     (lambda (len)
+       (set! byte 0)
+       (match-let*
+        ([,bv (get-bytevector-exactly-n ip len)]
+         [#t (bytevector? bv)]
+         [,@len (bytevector-length bv)])
+        (do ([i 0 (fx+ i 1)] [expect 0 (fxmod (fx+ expect 1) 256)])
+            ((fx= i len) 'ok)
+          (assert (fx= expect (bytevector-u8-ref bv i))))))]
+    [,_ (set! count (+ 127 513 4096))]
+    [ok (test-n 127)]
+    [ok (test-n 513)]
+    [ok (test-n 4096)]
+    ;; fail at eof
+    [`(catch unexpected-eof) (try (test-n 1))]
+    [,_ (set! count 7)]
+    [ok (test-n 3)]
+    ;; fail on retry
+    [`(catch unexpected-eof) (try (test-n 5))]
+    )
+   'ok))
 
 (hook-console-input)
