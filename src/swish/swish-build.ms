@@ -89,7 +89,7 @@
   (swish-build-test '("--help")
     '("Usage:"
       seek
-      "write output"
+      "compile to <output>"
       seek
       "source filename"))
   (swish-build-test '("-h" "details")
@@ -224,13 +224,16 @@
   ;; fat with scheme only
   (write-example "fat3" hello-fat)
   (build-example "fat3" '("-b" "scheme"))
-  ;; Set SCHEMEHEAPDIRS explicitly since Chez Scheme v10.x changes the default
-  ;; heap search path so that it is relative to the executable. Otherwise the
-  ;; fat3 binary cannot find the system petite.boot.
+  ;; To allow the fat3 binary to find petite.boot, we explicitly set
+  ;; SCHEMEHEAPDIRS. Chez v10.x changes the default heap search path
+  ;; so that it is relative to the executable. As of Chez v10.x, the
+  ;; executables are installed into the lib directory, so we must also
+  ;; include the base executable path.
   (parameterize ([SCHEMEHEAPDIRS
                   (let ([base (path-parent scheme-exe)])
                     (join
                      (list
+                      base ;; v10.x symlinks .../bin/scheme to .../lib/csv%v/%m/scheme
                       (path-combine base ".." ".." "boot" "%m")
                       (path-combine base ".." "lib" "csv%v" "%m")
                       "")
@@ -579,7 +582,7 @@
               [stdout ("A: [1,2,3]")]
               [stderr (,err-msg)]))
      (assert
-      (or (string=? err-msg "rtlibs-swish-fat: library (swish json) is not visible.")
+      (or (string=? err-msg "rtlibs-swish-fat: library (swish dsm) not found.") ;; (swish json) now imports (swish dsm)
           ;; 9.5.3 provides a more precise error message
           (string=? err-msg "rtlibs-swish-fat: attempt to import invisible library (swish json).")))
      'ok])
@@ -1567,6 +1570,12 @@
         (for-each pretty-print
           `((include "here.ss")
             (pretty-print x))))))
+  (define file3
+    (write-test-file "another/nested/path/main.ss"
+      (lambda ()
+        (for-each pretty-print
+          `((include "here.ss")
+            (pretty-print (+ 4 (* x 10))))))))
   ;; fails to build if source directories not specified
   (match (catch (build-example "test-sd" '()))
     [#(EXIT
@@ -1575,7 +1584,17 @@
           ("swish-build: failed for here.ss: no such file or directory.")]))
      'ok])
   (build-example "test-sd" `("-s" ,(path-parent file1)))
-  (run-thin "test-sd" '() '("123")))
+  (run-thin "test-sd" '() '("123"))
+  ;; we should also be able to find the source-file itself via -s
+  ;; source-directories use swish-build-test directly to avoid the path-combine
+  (swish-build-test
+   `("-o" ,(output-file "test-sd2")
+     "-s" ,(path-parent file3)
+     "-s" ,(path-parent file1)
+     ,(path-last file3))
+   '())
+  (run-thin "test-sd2" '() '("1234"))
+  )
 
 (isolate-mat source-file-switch ()
   (define lib1
@@ -1673,3 +1692,94 @@
   (delete-file prog.so)
   (swish-build-test `(,prog.ss "-o" ,prog.so "-b" "petite") '())
   (assert (file-exists? prog.so)))
+
+(isolate-mat prelude ()
+  (define-syntax expect-error
+    (syntax-rules (stdout stderr)
+      [(_ expr (stdout stdout-pattern ...) (stderr stderr-pattern ...))
+       (match (try expr)
+         [`(catch `(<os-process-failed> ,stdout ,stderr))
+          (match-regexps `(,stdout-pattern ...) stdout)
+          (match-regexps `(,stderr-pattern ...) stderr)])]))
+  (define (so-file fn) (string-append (path-root fn) ".so"))
+  (define setup.ss
+    (write-example (path-combine "try-prelude-source" "setup")
+      '((printf "loaded setup.ss\n"))))
+  (define lib.ss
+    (write-example (path-combine "try-prelude-lib" "lib")
+      '((library (lib) (export x) (import (scheme)) (define x 123)))))
+  (define src.ss
+    (write-example "src"
+      '((let-syntax ([foo (lambda (x) (pretty-print (length (library-directories))) #'#f)]) foo)
+        (import (lib))
+        (printf "x = ~s\n" x))))
+  (define prog (path-combine (path-parent src.ss) (fix-exe "prog")))
+  (define (cleanup)
+    (for-each delete-file
+      (map so-file (list setup.ss lib.ss src.ss))))
+
+  ;; multiple explicit --prelude command-line arguments, some with multiple
+  ;; <prelude> arguments (segmented artificially here to show that we
+  ;; concatenate them before parsing the prelude expressions).
+  (cleanup)
+  (swish-build-test
+   `(,src.ss "-L" ,(path-parent lib.ss)
+     "--prelude" "(library-e" "xtens" "ions '((\".ss\" . \".so\")))"
+     "--prelude" "(import-notify #t)" "-o" ,prog)
+   '("3" ;; length of library-directories, since we add "try-prelude-lib"
+     seek "import: found source file.*try-prelude-lib.*lib[.]ss"
+     seek "import: compiling.*try-prelude-lib.*lib[.]ss.* to .*lib[.]so"))
+  (run-thin "prog" '() '("x = 123"))
+
+  ;; like the previous test, except a --prelude expression sets
+  ;; library-directories and this supercedes the -L command-line argument,
+  ;; so we don't find the library
+  (cleanup)
+  (expect-error
+   (swish-build-test `(,src.ss "-L" ,(path-parent lib.ss)
+                       "--prelude" "(library-extensions '((\".ss\" . \".so\")))"
+                       "(library-directories \".\")"
+                       "--prelude" "(import-notify #t)" "-o" "failed") '())
+   (stdout "1"
+     "import: did not find source file.*lib[.]ss"
+     "import: did not find object file.*lib[.]so")
+   (stderr "swish-build: library [(]lib[)] not found[.]"))
+
+  ;; --prelude-file located via -s source directories
+  ;; --prelude-file content evaluated after --prelude
+  ;; show that prelude works when compiling a component (-c)
+  (cleanup)
+  (swish-build-test
+   `(,src.ss "-c"
+     "-s" ,(path-parent setup.ss)
+     "-L" ,(path-parent lib.ss)
+     "--prelude-file" "setup.ss"
+     "--prelude" "(library-extensions '((\".ss\" . \".so\")))" "(pretty-print 'one)"
+     "--prelude" "(pretty-print 'two)" "(import-notify #t)" "-o" ,prog)
+   '("one" "two" "loaded setup.ss"
+     "3" ;; length of library-directories, since we add "try-prelude-lib"
+     seek "import: found source file.*try-prelude-lib.*lib[.]ss"
+     seek "import: compiling.*try-prelude-lib.*lib[.]ss.* to .*lib[.]so"))
+
+  ;; --prelude-file located via explicit path
+  ;; all prelude expressions evaluated before we start to compile and hit syntax error
+  (cleanup)
+  (expect-error
+   (swish-build-test
+    `(,(write-example "incomplete" '((define)))
+      "--prelude" "(pretty-print 'one)"
+      "--prelude-file" ,setup.ss
+      "--prelude" "(pretty-print 'two)" "-o" "failed") '())
+   (stdout "one" "two" "loaded setup.ss")
+   (stderr "swish-build: invalid syntax [(]define[)]"))
+
+  ;; we try to provide useful source error
+  (cleanup)
+  (expect-error
+   (swish-build-test
+    `(,src.ss
+      "--prelude" "(pretty-print 'one) (define)"
+      "-o" "failed") '())
+   (stdout) ;; error occurrs while expanding (begin (pretty-print 'one) (define)), so no output
+   (stderr "swish-build: invalid syntax [(]define[)] at char 20 of --prelude"))
+  )

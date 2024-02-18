@@ -49,6 +49,7 @@
    start-event-mgr
    start-silent-event-mgr
    system-mat
+   test:receive
    )
   (import
    (chezscheme)
@@ -193,9 +194,11 @@
                      (let ([m (monitor p)])
                        (receive (until deadline (cons p ls))
                          [`(DOWN ,@m ,@p ,r) ls])))))])
+        ;; in case p is not linked to the process running the mat
+        (for-each (lambda (p) (kill p 'shutdown)) rogues)
         (for-each
          (lambda (rogue)
-           (receive (after kill-delay (kill rogue 'shutdown))
+           (receive (after kill-delay (kill rogue 'kill))
              [`(DOWN ,m ,@rogue ,r) 'ok]))
          rogues))))
 
@@ -346,6 +349,30 @@
               [stdout (receive [#(stdout ,@os-pid ,lines) lines])]
               [stderr (receive [#(stderr ,@os-pid ,lines) lines])]
               [exit-status exit-status])])))))
+
+  (define-syntax (test:receive x)
+    (define (en-guarde cl)
+      (syntax-case cl ()
+        [(pattern (guard g) b1 b2 ...)
+         (eq? (datum guard) 'guard)
+         cl]
+        [(pattern b1 b2 ...)
+         #'(pattern (guard #t) b1 b2 ...)]))
+    (syntax-case x ()
+      [(_ (after timeout t1 t2 ...) clause ...)
+       (and (eq? (datum after) 'after) (getenv "TIMEOUT_SCALE_FACTOR"))
+       (with-syntax ([(quote #(at offset fn)) (find-source x)]
+                     [(n ...) (iota (length (datum (clause ...))))]
+                     [((pattern guard b1 b2 ...) ...)
+                      (map en-guarde #'(clause ...))])
+         #'(let* ([raw-timeout timeout]
+                  [start (erlang:now)])
+             (define (report where)
+               (fprintf (console-error-port) "hit clause ~s at ~a:~s after ~s ms [raw timeout ~s]\n"
+                 where fn offset (- (erlang:now) start) raw-timeout))
+             (receive (after (scale-timeout raw-timeout) (report 'timeout) t1 t2 ...)
+               [pattern guard (report n) b1 b2 ...] ...)))]
+      [(_ e ...) #'(receive e ...)]))
 
   (define (scale-timeout timeout)
     (define scale-factor
@@ -547,5 +574,4 @@
               [() (getenv var)]
               [(x) (when (string? x) (putenv var x))])))
          ...)]))
-
   )

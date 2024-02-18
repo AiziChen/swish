@@ -1084,9 +1084,12 @@ The following exceptions may be raised:
 \returns{} unspecified
 
 The \code{json:write} procedure writes the object \var{x} to the
-textual output port \var{op} in JSON format. JSON objects are sorted
-by key using \code{string<?} on the string values of the symbols to
-provide stable output. Scheme fixnums, bignums, and finite flonums may
+textual output port \var{op} in JSON format. By default, \code{json:write}
+sorts the keys of JSON objects using \code{string<?}, after converting
+the symbolic keys to strings.
+This sort order provides stable output.
+The \code{json:key<?} parameter may be used to alter or disable key sorting.
+Scheme fixnums, bignums, and finite flonums may
 be used as numbers.
 
 When \var{indent} is a non-negative fixnum, the output is more
@@ -1106,6 +1109,9 @@ arguments: the textual output port \var{op}, the Scheme object
 objects.  The \var{wr} procedure is equivalent to
 \code{(lambda (\var{op} \var{x} \var{indent}) (json:write \var{op} \var{x} \var{indent} \var{custom-write}))}.
 
+The default value of \var{custom-write} is the value stored in the
+\code{json:custom-write} process-parameter.
+
 If an object cannot be formatted, \code{\#(invalid-datum \var{x})}
 is raised.
 
@@ -1118,13 +1124,16 @@ is raised.
 Given a textual output port \var{op}, an \var{indent} level, and a
 writer procedure \var{wr}, the \code{json:write-object} construct
 writes a JSON object with the given \var{key} / \var{value} pairs to
-\var{op}, sorted by key using \code{string<?} on the string values of
-the symbols.  Each \var{key} must be a distinct symbol.  The \var{wr}
+\var{op}. By default, \code{json:write-object} sorts the keys using
+\code{string<?} on the string values of the symbols.
+To alter or disable key sorting, see the \code{json:key<?} parameter.
+
+Each \var{key} must be a distinct symbol.  The \var{wr}
 procedure takes \var{op}, an object \var{x}, and an \var{indent} level
 just like the \var{wr} procedure that is passed to \code{json:write}'s
 \var{custom-write} procedure.
 
-The following are equivalent, provided the keys are symbols.
+The following are equivalent, provided the keys are symbols and \code{json:key<?} has its default value.
 
 \antipar\begin{alltt}
 (begin (json:write \var{op} (json:make-object [\var{key} \var{value}] \etc) \var{indent}) \#t)
@@ -1133,6 +1142,54 @@ The following are equivalent, provided the keys are symbols.
 The latter trades code size and compile time for run-time efficiency.
 At compile time, \code{json:write-object} sorts the keys and
 preformats the strings that will separate values.
+
+\defineentry{json:pretty}
+\begin{procedure}
+  \code{(json:pretty \var{x} \opt{\var{op}})}
+\end{procedure}
+\returns{} unspecified
+
+The \code{json:pretty} procedure formats an object \var{x} to the
+optional textual output port \var{op} in a human-readable form. The
+object is indented and keys are sorted using
+\code{natural-string-ci<?}. The default value of \var{op} is
+\code{(current-output-port)}.
+
+Calling \code{(json:pretty x)} is roughly equivalent to the following:
+\antipar\codebegin
+(parameterize ([json:key<? natural-string-ci<?])
+  (json:write (current-output-port) x 0))
+\codeend
+
+\defineentry{json:custom-write}
+\begin{parameter}
+  \code{json:custom-write}
+\end{parameter}
+\returns{} a procedure or \code{\#f}
+
+The \code{json:custom-write} process-parameter determines the default
+\var{custom-write} argument for \code{json:write} and the other JSON
+output procedures.
+
+\defineentry{json:key<?}
+\begin{parameter}
+  \code{json:key<?}
+\end{parameter}
+\returns{} a boolean or a predicate for comparing two strings
+
+The \code{json:key<?} parameter determines whether and how
+\code{json:pretty}, \code{json:write}, and \code{json:write-object} sort keys
+when writing JSON objects.
+If set to \code{\#f}, keys are not sorted and the output order is arbitrary.
+Otherwise, the output is sorted by obtaining a string for each key
+via \code{symbol->string} and comparing those strings using the predicate
+specified by \code{json:key<?}.
+If \code{json:key<?} is set to \code{\#t}, which is the default,
+then \code{json:pretty} sorts with \code{natural-string-ci<?}
+while \code{json:write} and \code{json:write-object} sort with
+\code{string<?}.
+To affect the output of \code{json:write-object}, \code{json:key<?} must
+be set to the desired value at expand time.
 
 \defineentry{json:object->bytevector}
 \begin{procedure}

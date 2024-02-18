@@ -44,15 +44,19 @@
    [test-run --test-run (string "<UUID>")
     "use the specified <UUID> to identify the test run instead of generating one"]
    [rerun --rerun (string "<type>")
-     (ct:join #\space
-       "rerun tests whose result type matches <type>, where <type> is"
+     '("rerun tests whose result type matches <type>, where <type> is"
        "one of {pass|fail|skip} or a parenthesized Scheme list of those types;"
        "here <spec> specifies test results in .ms.mo or .ss.mo files")]
    [specs (list . "<spec>") "directory | suite [{test | -t test} ...]"]))
 
 (define test-and-report-cli
   (cli-specs
-   [progress --progress (string "<mode>") "<mode>={test|suite|none}"]
+   [progress --progress (string "<mode>")
+     '("<mode>={test|suite|suite-verbose|none}\n"
+       "where 'test' shows pass/fail/skip for each test,"
+       "'suite' shows pass/fail at the suite level, and"
+       "'suite-verbose' is like 'suite' but shows fail/skip"
+       "for individual tests that do not pass.")]
    [load-prof --load-profile (list "<file>" "<file>" ...)
     "load the specified profile(s)"]
    [save-prof --save-profile (string "<file>")
@@ -244,22 +248,9 @@
     (library-directories)))
 
 (define (find-files path . extensions)
-  (define (combine path fn) (if (equal? "." path) fn (path-combine path fn)))
-  (let search ([path path] [hits '()])
-    (match (catch (list-directory path))
-      [#(EXIT ,reason) hits]
-      [,found
-       (fold-left
-        (lambda (hits entry)
-          (match entry
-            [(,fn . ,@DIRENT_DIR) (search (combine path fn) hits)]
-            [(,fn . ,@DIRENT_FILE)
-             (if (ormap (lambda (ext) (ends-with-ci? fn ext)) extensions)
-                 (cons (combine path fn) hits)
-                 hits)]
-            [,_ hits])) ;; not following symlinks
-        hits
-        found)])))
+  (filter-files path
+    (lambda (d) #t)
+    (lambda (f) (ormap (lambda (ext) (ends-with? f ext)) extensions))))
 
 (import
  (swish mat)
@@ -794,7 +785,7 @@
         [coverage (opt 'coverage)]
         [pre-specs (extract-pre-specs (or (opt 'specs) '()))])
     (check-report-format report 'report)
-    (unless (memq progress '(#f test suite none))
+    (unless (memq progress '(#f test suite suite-verbose none))
       (fail "invalid ~a ~s" (option-named 'progress) progress))
     (cond
      [(and load-prof (not (or save-prof coverage)))
