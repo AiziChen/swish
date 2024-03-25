@@ -131,7 +131,7 @@
      [(int32? exit-code) exit-code]
      [(eq? exit-code (void)) 0]
      [else
-      (console-event-handler (format "application shutdown due to (exit ~s)" exit-code))
+      ($console-event-handler (format "application shutdown due to (exit ~s)" exit-code))
       1]))
 
   (profile-omit ;; profiler won't have a chance to save data for these due to osi_exit
@@ -175,7 +175,7 @@
 
   (define (trap-signals handler)
     (meta-cond
-     [(memq (machine-type) '(i3nt ti3nt a6nt ta6nt))
+     [windows?
       (signal-handler SIGBREAK handler)
       (signal-handler SIGHUP handler)
       (signal-handler SIGINT handler)]
@@ -197,6 +197,7 @@
           (set! started? #t)
           (base-exception-handler app-exception-handler)
           (random-seed (+ (remainder (erlang:now) (- (ash 1 32) 1)) 1))
+          (trap-signals handle-signal)
           (hook-console-input)
           (call/cc
            (lambda (bail)
@@ -211,7 +212,6 @@
              (when stand-alone?
                (app:name who)
                (app:path who))
-             (trap-signals handle-signal)
              (set! Charon
                (spawn
                 (let ([me self])

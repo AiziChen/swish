@@ -129,7 +129,7 @@ clean: platform-clean
 	rm -f *.mo *.ms.html *.ss.html
 
 .PHONY: install install-batteries install-bin install-check install-doc
-INSTLIBDIR := ${INSTALLROOT}/lib/swish${SWISH_VERSION}/${MACHINE_TYPE}
+INSTLIBDIR := ${INSTALLROOT}/lib/swish${SWISH_VERSION}/${ARCH_DEST}
 INSTWEBDIR := ${INSTALLROOT}/lib/swish${SWISH_VERSION}/web
 INSTDOCDIR := ${INSTALLROOT}/share/doc/swish${SWISH_VERSION}
 
@@ -143,7 +143,7 @@ endif
 install-doc: install-check
 	${GNU_INSTALL} --directory "${INSTDOCDIR}"
 	${GNU_INSTALL} --mode=444 ../../LICENSE "${INSTDOCDIR}"
-	${GNU_INSTALL} --mode=444 ../../NOTICE "${INSTDOCDIR}"
+	${GNU_INSTALL} --mode=444 ../../NOTICE.org "${INSTDOCDIR}"
 	${GNU_INSTALL} --mode=444 ../../doc/swish.pdf "${INSTDOCDIR}"
 
 install-batteries: install-check
@@ -151,6 +151,9 @@ install-batteries: install-check
 	${GNU_INSTALL} --mode=444 "${SCHEMEBOOT}"/petite.boot "${INSTLIBDIR}"
 	${GNU_INSTALL} --mode=444 "${SCHEMEBOOT}"/scheme.boot "${INSTLIBDIR}"
 	${GNU_INSTALL} --mode=444 "${SCHEMEBOOT}"/scheme.h "${INSTLIBDIR}"
+ifneq ($(SCHEMEDLL),)
+	${GNU_INSTALL} --mode=555 "${SCHEMEDLL}" "${INSTLIBDIR}"
+endif
 
 install-bin: install-check all
 	${GNU_INSTALL} --directory "${INSTLIBDIR}"
@@ -163,12 +166,12 @@ install-bin: install-check all
 ifeq ($(MACHINE_TYPE:nt=), ${MACHINE_TYPE}) # if not Windows
 	${GNU_INSTALL} --mode=444 ${SwishLibs} "${INSTLIBDIR}"
 else
-	${GNU_INSTALL} ${SwishLibs} "${INSTLIBDIR}"
+	${GNU_INSTALL} --mode=555 ${SwishLibs} "${INSTLIBDIR}"
 endif
 	${GNU_INSTALL} --directory "${INSTALLROOT}"/bin
-	ln -sf "${INSTLIBDIR}"/swish${EXESUFFIX} "${INSTALLROOT}"/bin/swish
-	ln -sf "${INSTLIBDIR}"/swish-build "${INSTALLROOT}"/bin/swish-build
-	ln -sf "${INSTLIBDIR}"/swish-test "${INSTALLROOT}"/bin/swish-test
+	${GNU_LN} -srf "${INSTLIBDIR}"/swish${EXESUFFIX} "${INSTALLROOT}"/bin/swish
+	${GNU_LN} -srf "${INSTLIBDIR}"/swish-build "${INSTALLROOT}"/bin/swish-build
+	${GNU_LN} -srf "${INSTLIBDIR}"/swish-test "${INSTALLROOT}"/bin/swish-test
 	${GNU_INSTALL} --directory "${INSTLIBDIR}"/lib
 	cd ../../${BUILD}/lib ; find . -type f -name '*.wpo' -a -not -iname 'internal*' -exec ${GNU_INSTALL} --mode=444 -D -T {} "${INSTLIBDIR}"/wpo/{} \;
 	cd ../../${BUILD}/lib ; find . -type f -name '*.so' -a -not -iname 'internal*' -exec ${GNU_INSTALL} --mode=444 -D -T {} "${INSTLIBDIR}"/lib/{} \;
@@ -186,5 +189,5 @@ mat-prereq:: | ${SETUP}
 mat-prereq:: ${SHLIBTEST} ${TESTREQUEST} scheme_aux.h
 	@printf "making mat-prereq ... "
 	@rm -rf ../../build/mat-prereq
-	@$(MAKE) install-batteries install-bin install-internal INSTALLROOT="$$(${NORMALIZE_PATH} ../../build/mat-prereq)" SWISH_VERSION=".x.y.z" MACHINE_TYPE="arch" > /dev/null
+	@$(MAKE) install-batteries install-bin install-internal INSTALLROOT="$$(${NORMALIZE_PATH} ../../build/mat-prereq)" SWISH_VERSION=".x.y.z" ARCH_DEST="arch" > /dev/null
 	@printf "done.\n"
